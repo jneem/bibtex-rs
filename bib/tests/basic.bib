@@ -1,0 +1,27 @@
+@comment{
+Everything is ignored until the next blank line
+}
+
+article{key,
+    title = "This is also ignored, because of the missing at symbol",
+}
+
+@article{key,
+    title = "Here is a field with quotes",
+    author = {Here is a field with braces},
+    journal = "Here is a field with {braces} nested {in{side}} of quotes",
+    editor = {Here is a field {with {braces} nested in{si{d}e}} of braces},
+}
+
+@book(book_key),
+    title = "Entries can be delimited with (), in which case the key can even contain )",
+    author = {Trailing commas are optional}
+)
+
+@string{field = "value"}
+@string(other_field = "other_value " # field)
+
+@article{article_with_macros,
+    title = field,
+    author = other_field # "_suffix",
+}
