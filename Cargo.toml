@@ -5,4 +5,5 @@ members = [
     "bst",
     "common",
     "driver",
+    "tectonic_tester",
 ]
