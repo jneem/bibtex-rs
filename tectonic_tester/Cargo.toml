@@ -8,4 +8,5 @@ edition = "2018"
 # There is a bug in tectonic's bibtex errors that is fixed in git.
 tectonic = { git = "https://github.com/tectonic-typesetting/tectonic.git" }
 bib = { path = "../bib/" }
+bstr = "0.2.8"
 

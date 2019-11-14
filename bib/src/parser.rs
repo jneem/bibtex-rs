@@ -65,6 +65,7 @@ impl<'read> Parser<'read> {
         } else if !self.input.is_eol() && !is_white(self.input.current()) && !next_char(self.input.current()) {
             Err(ErrorKind::InvalidIdChar(kind))
         } else {
+            self.input.mark_last_lowercase(id.len());
             Ok(id)
         }
     }
@@ -306,7 +307,9 @@ impl<'read> Parser<'read> {
 
     // Having just consumed a '@', parse the rest of the item.
     fn try_parse_item(&mut self) -> Result<Item, (Option<Item>, Error)> {
-        self.skip_white_space().map_err(|kind| (None, Error::new(kind, &self.input)))?;
+        // BibTex treats an error here as occurring inside an entry, even though we haven't really
+        // determined whether it's an entry or a command.
+        self.skip_white_space().map_err(|kind| (None, Error::with_context(kind, ErrorContext::Entry, &self.input)))?;
         let kind = self
             .scan_identifier(|c| c == b'(' || c == b'{', IdentifierKind::EntryKind)
             // BibTex treats a missing entry type as being an error in an entry.

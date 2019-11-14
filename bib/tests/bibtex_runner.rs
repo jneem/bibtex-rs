@@ -13,3 +13,4 @@ list_entries_failure!(expecting_delimiter, "expecting_delimiter.bib");
 list_entries_failure!(unterminated_preamble, "unterminated_preamble.bib");
 list_entries_failure!(unterminated_string, "unterminated_string.bib");
 list_entries_failure!(unbalanced_braces, "unbalanced_braces.bib");
+list_entries_failure!(error_cases, "error_cases.bib");

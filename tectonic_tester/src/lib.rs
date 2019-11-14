@@ -1,3 +1,4 @@
+use bstr::{BStr, BString, ByteSlice};
 use std::ffi::OsStr;
 use tectonic::BibtexEngine;
 use tectonic::engines::NoopIoEventBackend;
@@ -41,13 +42,13 @@ impl BibtexRunner {
             "min.aux",
         );
 
-        let stdout_data = String::from_utf8(self.io.files.borrow()[self.io.stdout_key()].clone()).unwrap();
-        let bbl_data = String::from_utf8(self.io.files.borrow()[OsStr::new("min.bbl")].clone()).unwrap();
+        let stdout_data = BString::from(self.io.files.borrow()[self.io.stdout_key()].clone());
+        let bbl_data = BString::from(self.io.files.borrow()[OsStr::new("min.bbl")].clone());
 
         BibtexOutput {
-            bbl_lines: bbl_data.lines().map(|s| s.to_owned()).filter(|s| !s.is_empty()).collect(),
+            bbl_lines: bbl_data.lines().map(BString::from).filter(|s| !s.is_empty()).collect(),
             warnings: Vec::new(), // FIXME
-            errors: parse_errors(&stdout_data),
+            errors: parse_errors(stdout_data.as_ref()),
         }
     }
 
@@ -66,15 +67,15 @@ impl BibtexRunner {
         }
         let ret = error_buf.is_empty();
         assert_eq!(keys, reference_output.bbl_lines);
-        assert_eq!(String::from_utf8(error_buf).unwrap(), reference_output.errors);
+        assert_eq!(BString::from(error_buf), reference_output.errors);
         ret
     }
 }
 
 pub struct BibtexOutput {
-    pub bbl_lines: Vec<String>,
-    pub warnings: Vec<String>,
-    pub errors: String,
+    pub bbl_lines: Vec<BString>,
+    pub warnings: Vec<BString>,
+    pub errors: BString,
 }
 
 // I'm not too sure how accurate this bibtex error parsing is, but we can refine it when we find
@@ -82,19 +83,19 @@ pub struct BibtexOutput {
 //
 // The current algorithm is: include everything between the first occurrence of --- and the message
 // "(There was 1 error message)" (or similar).
-fn parse_errors(bibtex_stdout: &str) -> String {
-    let mut ret = String::new();
+fn parse_errors(bibtex_stdout: &BStr) -> BString {
+    let mut ret = BString::from("");
 
     for line in bibtex_stdout.lines() {
-        if (line.starts_with("(There was") && line.ends_with("error message)"))
-            || (line.starts_with("(There were") && line.ends_with("error messages)")) {
+        if (line.starts_with(b"(There was") && line.ends_with(b"error message)"))
+            || (line.starts_with(b"(There were") && line.ends_with(b"error messages)")) {
                 // We've reached the end of the error messages, so return what we have.
                 return ret;
         }
 
         if !ret.is_empty() || line.find("---").is_some() {
-            ret.push_str(line);
-            ret.push('\n');
+            ret.extend_from_slice(line);
+            ret.push(b'\n');
         }
     }
 

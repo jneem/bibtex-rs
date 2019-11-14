@@ -172,6 +172,11 @@ impl<'read> Input<'read> {
         &self.line[self.col..]
     }
 
+    /// Returns what is left of the current line.
+    pub fn buffer_mut(&mut self) -> &mut [u8] {
+        &mut self.line[self.col..]
+    }
+
     /// Counts the number of successive characters, starting from the current position, that satisfy
     /// the predicate `f`.
     pub fn count<F: FnMut(u8) -> bool>(&self, mut f: F) -> usize {
@@ -184,9 +189,7 @@ impl<'read> Input<'read> {
         } else {
             let count = self.count(is_id);
             let mut id = self.buffer()[..count].to_owned();
-            for c in &mut id {
-                c.make_ascii_lowercase();
-            }
+            id.make_ascii_lowercase();
             self.advance_by(count);
             id
         }
@@ -201,6 +204,15 @@ impl<'read> Input<'read> {
         let ret = self.buffer()[..count].to_owned();
         self.advance_by(count);
         ret
+    }
+
+    /// Makes the previous `count` bytes in the buffer lowercase.  This is a pretty strange thing
+    /// to do, but it's required to match BibTex's error messages (because BibTex does the same
+    /// thing: often, when it modifies identifiers to make them lowercase it uses the current line
+    /// buffer, and then it uses that same line buffer when reporting errors).
+    pub fn mark_last_lowercase(&mut self, count: usize) {
+        debug_assert!(count <= self.col);
+        self.line[(self.col - count)..self.col].make_ascii_lowercase();
     }
 }
 
