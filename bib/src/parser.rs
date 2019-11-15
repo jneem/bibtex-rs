@@ -271,12 +271,11 @@ impl<'read> Parser<'read> {
         self.skip_white_space().map_err(|e| (None, e))?;
         // The allowed characters in the key of a bibtex entry depend on the delimiter. When
         // using (), the key is even allowed to contain ')'.
-        let mut key = if closing_delim == b')' {
+        let key = if closing_delim == b')' {
             self.input.scan_while(|b| !is_white(b) && b != b',')
         } else {
             self.input.scan_while(|b| !is_white(b) && b != b',' && b != b'}')
         };
-        key.make_ascii_lowercase();
 
         // TODO: BibTex maintains a list of entries that were cited in the .aux file. While
         // parsing, it skips over unneeded entries. We should also have some way of doing that.

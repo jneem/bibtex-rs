@@ -46,6 +46,9 @@ impl BibtexRunner {
         let bbl_data = BString::from(self.io.files.borrow()[OsStr::new("min.bbl")].clone());
 
         BibtexOutput {
+            // FIXME: for some reason I don't understand, our bst file is producing lots of blank
+            // lines. So we filter them out, but this means we're also filtering out any entries
+            // that truly have an empty key. So that isn't great.
             bbl_lines: bbl_data.lines().map(BString::from).filter(|s| !s.is_empty()).collect(),
             warnings: Vec::new(), // FIXME
             errors: parse_errors(stdout_data.as_ref()),
@@ -61,7 +64,10 @@ impl BibtexRunner {
         let mut keys = Vec::new();
         for entry in parser.entries() {
             match entry {
-                Ok(entry) => keys.push(String::from_utf8(entry.key).unwrap()),
+                Ok(entry) => if !entry.key.is_empty() { 
+                    // because of the FIXME above, we have to filter out empty keys here too.
+                    keys.push(String::from_utf8(entry.key).unwrap())
+                }
                 Err(e) => e.write_compatible_errmsg(&mut error_buf, "min.bib").unwrap(),
             }
         }
