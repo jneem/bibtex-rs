@@ -27,12 +27,13 @@ pub struct Error {
     pub kind: ErrorKind,
     /// In which context did this error occur?
     pub context: Option<ErrorContext>,
-    /// The line of input that was being parsed when the error occurred.
-    pub current_input: Vec<u8>,
-    /// The line number of the current line in the `.bib` file (starting from 1).
-    pub input_line: usize,
-    /// The column number at which the error occurred (starting from 1).
-    pub input_col: usize,
+
+    /// The state of the input when the error occurred.
+    ///
+    /// Note that storing a clone of the input state here is not the most efficient possible thing
+    /// (because much of the time we could probably get away without cloning it). But it's
+    /// convenient, and optimizing the error case probably isn't so important.
+    pub state: InputState,
 }
 
 impl Error {
@@ -40,9 +41,7 @@ impl Error {
         Error {
             kind,
             context: None,
-            input_line: input.cur_line_num(),
-            input_col: input.cur_col_num(),
-            current_input: input.cur_line().to_owned(),
+            state: InputState::new(input),
         }
     }
 
@@ -50,9 +49,7 @@ impl Error {
         Error {
             kind,
             context: Some(context),
-            input_line: input.cur_line_num(),
-            input_col: input.cur_col_num(),
-            current_input: input.cur_line().to_owned(),
+            state: InputState::new(input),
         }
     }
 
@@ -63,9 +60,9 @@ impl Error {
             buf.iter().map(|&c| if is_white(c) { b' ' } else { c }).collect()
         }
 
-        let before: Vec<u8> = map_space(&self.current_input[..self.input_col]);
+        let before: Vec<u8> = map_space(&self.state.line[..self.state.col_num]);
         let spaces = vec![b' '; before.len()];
-        let after: Vec<u8> = map_space(&self.current_input[self.input_col..]);
+        let after: Vec<u8> = map_space(&self.state.line[self.state.col_num..]);
         write.write_all(b" : ")?;
         write.write_all(&before)?;
         write.write_all(b"\n : ")?;
@@ -82,7 +79,7 @@ impl Error {
     // This corresponds to WEB section 221 in BibTex. It prints the line number, the contents of
     // the bad line, and the text "skipping whatever remains".
     fn common_err_msg(&self, write: &mut dyn io::Write, filename: &str) -> io::Result<()> {
-        writeln!(write, "---line {} of file {}", self.input_line, filename)?;
+        writeln!(write, "---line {} of file {}", self.state.line_num, filename)?;
         self.print_input_line(write)?;
         let context = match self.context {
             Some(ErrorContext::Command) => "command",
@@ -113,7 +110,7 @@ impl Error {
             UnterminatedPreamble(a) => err!("Missing \"{}\" in preamble command", xchr(a)),
             UnterminatedString(a) => err!("Missing \"{}\" in string command", xchr(a)),
             EmptyId(kind) => err!("You're missing {}", kind),
-            InvalidIdChar(kind) => err!("\"{}\" immediately follows {}", xchr(self.current_input[self.input_col]), kind),
+            InvalidIdChar(kind) => err!("\"{}\" immediately follows {}", xchr(self.state.line[self.state.col_num]), kind),
             UnbalancedBraces => err!("Unbalanced braces"),
             Io(ref e) => err!("I/O error {}", e),
         }
@@ -145,8 +142,6 @@ pub enum IdentifierKind {
     FieldName,
 }
 
-// TODO: this might not be the best, since the code here is really specific to the
-// bibtex-compatible error printer.
 impl std::fmt::Display for IdentifierKind {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         use IdentifierKind::*;
@@ -197,6 +192,27 @@ pub enum ErrorContext {
     Entry,
 }
 
+/// These are the kinds of warnings that might be encountered in a `.bib` file.
+///
+/// The dividing line between errors and warnings seems to be that upon an error, skip over the
+/// rest of the input until a blank line is encountered.
+#[derive(Clone, Debug)]
+pub enum WarningKind {
+}
+
+/// This struct represents a warning that occurred while parsing a `.bib` file. It also stores the
+/// location of the warning in that file.
+///
+/// An `Warning` is capable of producing BibTex-compatible error messages, with the
+/// [`Warning::write_comwrite_compatible_errmsg`] function.
+#[derive(Clone, Debug)]
+pub struct Warning {
+    /// What kind of warning is this?
+    pub kind: WarningKind,
+    /// The state of the input when the warning occurred.
+    pub state: InputState,
+}
+
 impl From<io::Error> for ErrorKind {
     fn from(e: io::Error) -> ErrorKind {
         ErrorKind::Io(Arc::new(e))
@@ -222,3 +238,63 @@ impl PartialEq for ErrorKind {
     }
 }
 
+/// An `ErrorReporter` provides hooks for the parser to call when it encounters an error or a
+/// warning.
+pub trait ErrorReporter {
+    /// This is called whenever the parser encounters an error. The `input` shows the current state
+    /// of the input (including, for example, line and column number).
+    fn error(&mut self, error: &Error);
+
+    /// This is called whenever the parser encounters a warning. The `input` shows the current state
+    /// of the input (including, for example, line and column number).
+    fn warning(&mut self, warning: &Warning);
+}
+
+/// The `ErrorReporter` impl for `()` simply ignores all errors and warnings.
+impl ErrorReporter for () {
+    fn error(&mut self, _: &Error) {}
+    fn warning(&mut self, _: &Warning) {}
+}
+
+/// Stores the state of the input where an error or a warning occurred.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputState {
+    /// The number of the line (starting from 1) where the error occurred.
+    pub line_num: usize,
+    /// The column where the error occurred.
+    pub col_num: usize,
+    /// The contents of the line where the error occurred. (TODO: document the weird part about
+    /// this)
+    pub line: Vec<u8>,
+}
+
+impl InputState {
+    /// Returns a copy of the current state of the input.
+    pub fn new(input: &Input) -> InputState {
+        InputState {
+            line_num: input.cur_line_num(),
+            col_num: input.cur_col_num(),
+            line: input.cur_line().to_owned(),
+        }
+    }
+}
+
+/// Provides a simple implementation of `ErrorReporter` that just saves all errors and warnings
+/// into two big `Vec`s.
+#[derive(Clone, Debug, Default)]
+pub struct VecErrorReporter {
+    /// The list of all errors that occurred (in order from first encountered to last encountered).
+    pub errors: Vec<Error>,
+    /// The list of all warnings that occurred (in order from first encountered to last encountered).
+    pub warnings: Vec<Warning>,
+}
+
+impl<'a> ErrorReporter for &'a mut VecErrorReporter {
+    fn error(&mut self, error: &Error) {
+        self.errors.push(error.clone());
+    }
+
+    fn warning(&mut self, warning: &Warning) {
+        self.warnings.push(warning.clone());
+    }
+}

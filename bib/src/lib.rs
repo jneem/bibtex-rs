@@ -22,8 +22,8 @@
 //! }
 //! "#;
 //!
-//! let parser = Parser::new(bib_data.as_bytes());
-//! let entries = parser.entries().collect::<Result<Vec<_>, _>>().unwrap();
+//! let parser = Parser::new(bib_data.as_bytes(), ());
+//! let entries = parser.entries().collect::<Vec<_>>();
 //!
 //! assert_eq!(&entries[0].fields[&b"author"[..]], b"Herman Melville");
 //! assert_eq!(&entries[1].fields[&b"author"[..]], b"Shannon, C. E.");
@@ -41,7 +41,7 @@
 //! parser, specifically:
 //! 
 //! - Predefined macros: `.bst` files can define macros that can be encountered and expanded within
-//!     the `.bib1 file. For example, many standard `.bst` files the macro `jan`, which expands
+//!     the `.bib` file. For example, many standard `.bst` files the macro `jan`, which expands
 //!     to `"January"`. Since our parser doesn't know which macros should be predefined, you will
 //!     need to tell it. (This is not yet supported, but it will be.)
 //! - Entry filters: the `.aux` file tells BibTex which entries are required (usually, only the

@@ -7,6 +7,7 @@ use tectonic::status::NoopStatusBackend;
 use tectonic::io::memory::MemoryIo;
 
 use bib::Parser;
+use bib::error::VecErrorReporter;
 
 pub struct BibtexRunner {
     bib_data: Vec<u8>,
@@ -59,17 +60,18 @@ impl BibtexRunner {
     // true if the parse succeeded with no errors.
     pub fn check_ours(&mut self) -> bool {
         let reference_output = self.reference_output();
+        let mut errors = VecErrorReporter::default();
         let mut error_buf = Vec::new();
-        let parser = Parser::new(&self.bib_data[..]);
+        let parser = Parser::new(&self.bib_data[..], &mut errors);
         let mut keys = Vec::new();
         for entry in parser.entries() {
-            match entry {
-                Ok(entry) => if !entry.key.is_empty() { 
-                    // because of the FIXME above, we have to filter out empty keys here too.
-                    keys.push(String::from_utf8(entry.key).unwrap())
-                }
-                Err(e) => e.write_compatible_errmsg(&mut error_buf, "min.bib").unwrap(),
+            if !entry.key.is_empty() { 
+                // because of the FIXME above, we have to filter out empty keys here too.
+                keys.push(String::from_utf8(entry.key).unwrap())
             }
+        }
+        for err in errors.errors {
+            err.write_compatible_errmsg(&mut error_buf, "min.bib").unwrap();
         }
         let ret = error_buf.is_empty();
         assert_eq!(keys, reference_output.bbl_lines);

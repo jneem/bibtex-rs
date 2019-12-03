@@ -3,11 +3,13 @@ use common::input::is_white;
 use std::collections::HashMap;
 
 use crate::Entry;
-use crate::error::{Error, ErrorContext, ErrorKind, IdentifierKind};
+use crate::error::{Error, ErrorContext, ErrorKind, ErrorReporter, IdentifierKind};
 
 /// A parser for `.bib` files.
-pub struct Parser<'read> {
+pub struct Parser<'read, 'error> {
     input: Input<'read>,
+
+    report: Box<dyn ErrorReporter + 'error>,
 
     // BibTex does space compression on macros at substitution time. We do it at declaration time,
     // so the values stored here have already had their spaces compressed.
@@ -18,21 +20,21 @@ pub struct Parser<'read> {
     cur_macro: Option<Vec<u8>>,
 }
 
-impl<'read> Parser<'read> {
+impl<'read, 'error> Parser<'read, 'error> {
     /// Creates a new [`Parser`] that's ready to parse the input given in `read`.
-    pub fn new<R: std::io::BufRead + 'read>(read: R) -> Parser<'read> {
+    pub fn new<R: std::io::BufRead + 'read, E: ErrorReporter + 'error>(read: R, error: E) -> Parser<'read, 'error> {
         Parser {
             input: Input::from_reader(read),
+            report: Box::new(error),
             macros: HashMap::new(),
             cur_macro: None,
         }
     }
 
     /// Returns an iterator over all the entries (and errors) in this `.bib` file.
-    pub fn entries(self) -> EntriesIter<'read> {
+    pub fn entries(self) -> EntriesIter<'read, 'error> {
         EntriesIter {
             parser: self,
-            next_entry: None,
         }
     }
 
@@ -325,36 +327,45 @@ impl<'read> Parser<'read> {
         }
     }
 
-    // TODO: fix the docs
     // Finds and parses the next item, returning `None` if there are no more items. Any errors that
     // are encountered will be reported using `self.error`, but then we will simply continue
     // looking for the next item.
     //
     // The beginning of an item is signified by an '@' character, and so we will silently consume
     // everything up to the next '@'.
-    fn parse_item(&mut self) -> (Option<Item>, Option<Error>) {
-        // This is for matching BibTex's behavior: it refuses to start parsing a new item if it
-        // is on the last line of a file, and that line is not newline-terminated. This
-        // behavior can be seen in WEB section 223, where it checks if the file has not hit EOF
-        // before trying to start parsing the next entry.
-        if self.input.no_more_newlines() {
-            return (None, None);
-        }
-
-        while !self.input.skip_to(|c| c == b'@') {
-            if let Err(e) = self.input.input_line() {
-                return (None, Some(Error::new(e.into(), &self.input)));
-            } else if self.input.is_eof() {
-                return (None, None);
+    fn parse_item(&mut self) -> Option<Item> {
+        loop {
+            // This is for matching BibTex's behavior: it refuses to start parsing a new item if it
+            // is on the last line of a file, and that line is not newline-terminated. This
+            // behavior can be seen in WEB section 223, where it checks if the file has not hit EOF
+            // before trying to start parsing the next entry.
+            if self.input.no_more_newlines() {
+                return None;
             }
-        }
 
-        debug_assert!(self.input.current() == b'@');
-        self.input.advance();
+            while !self.input.skip_to(|c| c == b'@') {
+                if let Err(e) = self.input.input_line() {
+                    self.report.error(&Error::new(e.into(), &self.input));
+                    continue;
+                } else if self.input.is_eof() {
+                    return None;
+                }
+            }
 
-        match self.try_parse_item() {
-            Ok(it) => (Some(it), None),
-            Err((maybe_item, err)) => (maybe_item, Some(err)),
+            debug_assert!(self.input.current() == b'@');
+            self.input.advance();
+
+            match self.try_parse_item() {
+                Ok(it) => {
+                    return Some(it);
+                }
+                Err((maybe_item, err)) => {
+                    self.report.error(&err);
+                    if maybe_item.is_some() {
+                        return maybe_item;
+                    }
+                }
+            }
         }
     }
 
@@ -374,34 +385,20 @@ impl<'read> Parser<'read> {
 }
 
 /// An iterator over bibtex entries.
-pub struct EntriesIter<'read> {
-    parser: Parser<'read>,
-    // The parser tends to produce errors at the same time as it produces partially valid entries. In
-    // order to provide a more friendly iterator interface, we report the error first, and then the
-    // entry after. This means we need to store the entry until the next call to `next()`.
-    next_entry: Option<Entry>,
+pub struct EntriesIter<'read, 'error> {
+    parser: Parser<'read, 'error>,
 }
 
-impl<'read> Iterator for EntriesIter<'read> {
-    type Item = Result<Entry, Error>;
+impl<'read, 'error> Iterator for EntriesIter<'read, 'error> {
+    type Item = Entry;
 
-    fn next(&mut self) -> Option<Result<Entry, Error>> {
-        if let Some(entry) = self.next_entry.take() {
-            return Some(Ok(entry))
-        }
-        loop {
-            match self.parser.parse_item() {
-                (Some(Item::Entry(e)), None) => return Some(Ok(e)),
-                (Some(Item::Entry(e)), Some(err)) => {
-                    self.next_entry = Some(e);
-                    return Some(Err(err));
-                }
-                (_, Some(err)) => return Some(Err(err)),
-                (None, None) => return None,
-                // If we get an item that isn't an entry, ignore it.
-                (_, None) => continue,
+    fn next(&mut self) -> Option<Entry> {
+        while let Some(item) = self.parser.parse_item() {
+            if let Item::Entry(e) = item {
+                return Some(e)
             }
         }
+        None
     }
 }
 
@@ -417,8 +414,8 @@ enum Item {
 mod tests {
     use super::*;
 
-    fn parser(s: &'static [u8]) -> Parser<'static> {
-        Parser::new(s)
+    fn parser(s: &'static [u8]) -> Parser<'static, 'static> {
+        Parser::new(s, ())
     }
 
     #[test]
