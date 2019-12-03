@@ -157,9 +157,10 @@ impl<'read> Parser<'read> {
                 if let Some(val) = self.macros.get(&id) {
                     Ok(val.to_owned())
                 } else {
-                    // The macro hasn't been defined yet.
-                    // TODO: what is the BibTex behavior?
-                    unimplemented!();
+                    // The macro hasn't been defined yet, but we don't error out (because BibTex
+                    // doesn't). Just issue a warning and substitute the empty string.
+                    // TODO: issue a warning
+                    Ok(Vec::new())
                 }
             }
         }
