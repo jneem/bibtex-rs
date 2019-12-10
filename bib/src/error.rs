@@ -15,6 +15,10 @@ fn xchr(c: u8) -> char {
     }
 }
 
+fn xchrs(cs: &[u8]) -> String {
+    cs.into_iter().cloned().map(xchr).collect()
+}
+
 /// This struct represents an error that occurred while parsing a `.bib` file. It also stores the
 /// location of the error in that file.
 ///
@@ -36,18 +40,131 @@ pub struct Error {
     pub state: InputState,
 }
 
-impl Error {
-    pub(crate) fn new(kind: ErrorKind, input: &Input<'_>) -> Error {
-        Error {
-            kind,
+/// These are the kinds of errors that might be encountered in a `.bib` file.
+///
+/// Most of these error kinds correspond to a particular error message that you might get from
+/// BibTex. The exception is `Io`, since BibTex doesn't check for I/O errors (it treats them as an
+/// EOF).
+#[derive(Clone, Debug)]
+pub enum ErrorKind {
+    /// We encountered the end of the file before we expected to.
+    UnexpectedEOF,
+    /// We were expecting to see an identifier, but instead we found a character that isn't allowed
+    /// in an identifier.
+    EmptyId(IdentifierKind),
+    /// While in the middle of reading an identifier, we found a character that was unexpected.
+    InvalidIdChar(IdentifierKind),
+    /// We wanted an equals sign, but didn't get it.
+    ExpectedEquals,
+    /// We were expecting one of two characters, but didn't get either one.
+    ExpectedEither(u8, u8),
+    /// While reading a string, we found a right brace without a corresponding left brace.
+    UnbalancedBraces,
+    /// A `@preamble` command was missing its closing delimiter.
+    UnterminatedPreamble(u8),
+    /// A `@string` command was missing its closing delimiter.
+    UnterminatedString(u8),
+    /// An I/O error occurred while reading the `.bib` file.
+    Io(Arc<io::Error>),
+}
+
+impl From<io::Error> for ErrorKind {
+    fn from(e: io::Error) -> ErrorKind {
+        ErrorKind::Io(Arc::new(e))
+    }
+}
+
+// The presence of io::Error prevents us from automatically deriving this.
+impl PartialEq for ErrorKind {
+    fn eq(&self, other: &ErrorKind) -> bool {
+        use ErrorKind::*;
+
+        match (self, other) {
+            (UnexpectedEOF, UnexpectedEOF) => true,
+            (UnbalancedBraces, UnbalancedBraces) => true,
+            (EmptyId(a), EmptyId(b)) => a == b,
+            (InvalidIdChar(a), InvalidIdChar(b)) => a == b,
+            (ExpectedEither(a, b), ExpectedEither(a1, b1)) => a == a1 && b == b1,
+            (ExpectedEquals, ExpectedEquals) => true,
+            (UnterminatedString(a), UnterminatedString(b)) => a == b,
+            (UnterminatedPreamble(a), UnterminatedPreamble(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Some of the error kinds in [`ErrorKind`] can happen either in different contexts within the
+/// `.bib` file. We keep track of the context, because it's sometimes needed for the error message.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ErrorContext {
+    /// The error was encountered while parsing a @string or @preamble command.
+    Command,
+    /// The error was encountered while parsing an entry (i.e. something like @article{ }).
+    Entry,
+}
+
+/// These are the kinds of warnings that might be encountered in a `.bib` file.
+///
+/// The dividing line between errors and warnings seems to be that upon an error, skip over the
+/// rest of the input until a blank line is encountered.
+#[derive(Clone, Debug)]
+pub enum WarningKind {
+    /// We tried to expand a string that wasn't defined.
+    UndefinedString(Vec<u8>),
+}
+
+/// These are the two categories of problems that can occur while parsing a `.bib` file.
+#[derive(Clone, Debug)]
+pub enum ProblemKind {
+    /// A warning is a problem that isn't particularly severe. At worst, it can result in messing
+    /// up some field of an entry.
+    Warning(WarningKind),
+    /// An error is a more severe problem. When we encounter an error in an entry, for example, we
+    /// skip over the rest of that entry.
+    Error(ErrorKind),
+}
+
+/// This struct represents a problem that occurred while parsing a `.bib` file. It also stores the
+/// location of the warning in that file.
+///
+/// An `Warning` is capable of producing BibTex-compatible error messages, with the
+/// [`Warning::write_comwrite_compatible_errmsg`] function.
+#[derive(Clone, Debug)]
+pub struct Problem {
+    /// What kind of problem is this?
+    pub kind: ProblemKind,
+
+    /// In which context did this error occur?
+    pub context: Option<ErrorContext>,
+
+    /// The state of the input when the error occurred.
+    ///
+    /// Note that storing a clone of the input state here is not the most efficient possible thing
+    /// (because much of the time we could probably get away without cloning it). But it's
+    /// convenient, and optimizing the error case probably isn't so important.
+    pub state: InputState,
+}
+
+impl Problem {
+    pub(crate) fn from_warning(kind: WarningKind, input: &Input<'_>) -> Problem {
+        Problem {
+            kind: ProblemKind::Warning(kind),
             context: None,
             state: InputState::new(input),
         }
     }
 
-    pub(crate) fn with_context(kind: ErrorKind, context: ErrorContext, input: &Input<'_>) -> Error {
-        Error {
-            kind,
+    pub(crate) fn from_error(kind: ErrorKind, input: &Input<'_>) -> Problem {
+        Problem {
+            kind: ProblemKind::Error(kind),
+            context: None,
+            state: InputState::new(input),
+        }
+    }
+
+    pub(crate) fn from_error_with_context(kind: ErrorKind, context: ErrorContext, input: &Input<'_>) -> Problem {
+        Problem {
+            kind: ProblemKind::Error(kind),
             context: Some(context),
             state: InputState::new(input),
         }
@@ -90,8 +207,12 @@ impl Error {
         Ok(())
     }
 
+    fn common_warn_msg(&self, write: &mut dyn io::Write, filename: &str) -> io::Result<()> {
+        writeln!(write, "--line {} of file {}", self.state.line_num, filename)?;
+        Ok(())
+    }
 
-    fn write_compatible_errmsg_dyn(&self, write: &mut dyn io::Write, filename: &str) -> io::Result<()> {
+    fn write_compatible_errmsg_dyn(&self, kind: &ErrorKind, write: &mut dyn io::Write, filename: &str) -> io::Result<()> {
         use ErrorKind::*;
 
         macro_rules! err {
@@ -103,7 +224,7 @@ impl Error {
             }
         };
 
-        match self.kind {
+        match *kind {
             UnexpectedEOF => err!("Illegal end of database file"),
             ExpectedEquals => err!("I was expecting an \"=\""),
             ExpectedEither(a, b) => err!("I was expecting a `{}' or a `{}'", xchr(a), xchr(b)),
@@ -117,12 +238,34 @@ impl Error {
         Ok(())
     }
 
+    fn write_compatible_warnmsg_dyn(&self, kind: &WarningKind, write: &mut dyn io::Write, filename: &str) -> io::Result<()> {
+        use WarningKind::*;
+
+        macro_rules! warn {
+            ($($args:expr),*) => {
+                {
+                    writeln!(write, $($args,)*)?;
+                    self.common_warn_msg(write, filename)?;
+                }
+            }
+        };
+
+        match kind {
+            UndefinedString(ref name) => warn!("Warning--string name \"{}\" is undefined", xchrs(name)),
+        }
+
+        Ok(())
+    }
+
     /// Writes (to `write`) an error message identical to one that `BibTex` would produce.
     ///
     /// Because BibTex's error messages can include the name of the input file, you need to tell us
     /// what it is.
     pub fn write_compatible_errmsg<W: io::Write>(&self, mut write: W, filename: &str) -> io::Result<()> {
-        self.write_compatible_errmsg_dyn(&mut write, filename)
+        match self.kind {
+            ProblemKind::Error(ref err) => self.write_compatible_errmsg_dyn(err, &mut write, filename),
+            ProblemKind::Warning(ref w) => self.write_compatible_warnmsg_dyn(w, &mut write, filename),
+        }
     }
 }
 
@@ -154,106 +297,17 @@ impl std::fmt::Display for IdentifierKind {
     }
 }
 
-/// These are the kinds of errors that might be encountered in a `.bib` file.
-///
-/// Most of these error kinds correspond to a particular error message that you might get from
-/// BibTex. The exception is `Io`, since BibTex doesn't check for I/O errors (it treats them as an
-/// EOF).
-#[derive(Clone, Debug)]
-pub enum ErrorKind {
-    /// We encountered the end of the file before we expected to.
-    UnexpectedEOF,
-    /// We were expecting to see an identifier, but instead we found a character that isn't allowed
-    /// in an identifier.
-    EmptyId(IdentifierKind),
-    /// While in the middle of reading an identifier, we found a character that was unexpected.
-    InvalidIdChar(IdentifierKind),
-    /// We wanted an equals sign, but didn't get it.
-    ExpectedEquals,
-    /// We were expecting one of two characters, but didn't get either one.
-    ExpectedEither(u8, u8),
-    /// While reading a string, we found a right brace without a corresponding left brace.
-    UnbalancedBraces,
-    /// A `@preamble` command was missing its closing delimiter.
-    UnterminatedPreamble(u8),
-    /// A `@string` command was missing its closing delimiter.
-    UnterminatedString(u8),
-    /// An I/O error occurred while reading the `.bib` file.
-    Io(Arc<io::Error>),
-}
 
-/// Some of the error kinds in [`ErrorKind`] can happen either in different contexts within the
-/// `.bib` file. We keep track of the context, because it's sometimes needed for the error message.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ErrorContext {
-    /// The error was encountered while parsing a @string or @preamble command.
-    Command,
-    /// The error was encountered while parsing an entry (i.e. something like @article{ }).
-    Entry,
-}
-
-/// These are the kinds of warnings that might be encountered in a `.bib` file.
-///
-/// The dividing line between errors and warnings seems to be that upon an error, skip over the
-/// rest of the input until a blank line is encountered.
-#[derive(Clone, Debug)]
-pub enum WarningKind {
-}
-
-/// This struct represents a warning that occurred while parsing a `.bib` file. It also stores the
-/// location of the warning in that file.
-///
-/// An `Warning` is capable of producing BibTex-compatible error messages, with the
-/// [`Warning::write_comwrite_compatible_errmsg`] function.
-#[derive(Clone, Debug)]
-pub struct Warning {
-    /// What kind of warning is this?
-    pub kind: WarningKind,
-    /// The state of the input when the warning occurred.
-    pub state: InputState,
-}
-
-impl From<io::Error> for ErrorKind {
-    fn from(e: io::Error) -> ErrorKind {
-        ErrorKind::Io(Arc::new(e))
-    }
-}
-
-// The presence of io::Error prevents us from automatically deriving this.
-impl PartialEq for ErrorKind {
-    fn eq(&self, other: &ErrorKind) -> bool {
-        use ErrorKind::*;
-
-        match (self, other) {
-            (UnexpectedEOF, UnexpectedEOF) => true,
-            (UnbalancedBraces, UnbalancedBraces) => true,
-            (EmptyId(a), EmptyId(b)) => a == b,
-            (InvalidIdChar(a), InvalidIdChar(b)) => a == b,
-            (ExpectedEither(a, b), ExpectedEither(a1, b1)) => a == a1 && b == b1,
-            (ExpectedEquals, ExpectedEquals) => true,
-            (UnterminatedString(a), UnterminatedString(b)) => a == b,
-            (UnterminatedPreamble(a), UnterminatedPreamble(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-/// An `ErrorReporter` provides hooks for the parser to call when it encounters an error or a
+/// An `ProblemReporter` provides hooks for the parser to call when it encounters an error or a
 /// warning.
-pub trait ErrorReporter {
-    /// This is called whenever the parser encounters an error. The `input` shows the current state
-    /// of the input (including, for example, line and column number).
-    fn error(&mut self, error: &Error);
-
-    /// This is called whenever the parser encounters a warning. The `input` shows the current state
-    /// of the input (including, for example, line and column number).
-    fn warning(&mut self, warning: &Warning);
+pub trait ProblemReporter {
+    /// This is called whenever the parser encounters a problem.
+    fn report(&mut self, problem: &Problem);
 }
 
-/// The `ErrorReporter` impl for `()` simply ignores all errors and warnings.
-impl ErrorReporter for () {
-    fn error(&mut self, _: &Error) {}
-    fn warning(&mut self, _: &Warning) {}
+/// The `ProblemReporter` impl for `()` simply ignores all errors and warnings.
+impl ProblemReporter for () {
+    fn report(&mut self, _: &Problem) {}
 }
 
 /// Stores the state of the input where an error or a warning occurred.
@@ -279,22 +333,9 @@ impl InputState {
     }
 }
 
-/// Provides a simple implementation of `ErrorReporter` that just saves all errors and warnings
-/// into two big `Vec`s.
-#[derive(Clone, Debug, Default)]
-pub struct VecErrorReporter {
-    /// The list of all errors that occurred (in order from first encountered to last encountered).
-    pub errors: Vec<Error>,
-    /// The list of all warnings that occurred (in order from first encountered to last encountered).
-    pub warnings: Vec<Warning>,
-}
-
-impl<'a> ErrorReporter for &'a mut VecErrorReporter {
-    fn error(&mut self, error: &Error) {
-        self.errors.push(error.clone());
-    }
-
-    fn warning(&mut self, warning: &Warning) {
-        self.warnings.push(warning.clone());
+/// This `ProblemReporter` impl just saves all of the problems into a big `Vec`.
+impl<'a> ProblemReporter for &'a mut Vec<Problem> {
+    fn report(&mut self, p: &Problem) {
+        self.push(p.clone());
     }
 }

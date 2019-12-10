@@ -1,56 +1,52 @@
 use bstr::{BStr, BString, ByteSlice};
-use std::ffi::OsStr;
-use tectonic::BibtexEngine;
-use tectonic::engines::NoopIoEventBackend;
-use tectonic::io::stack::IoStack;
-use tectonic::status::NoopStatusBackend;
-use tectonic::io::memory::MemoryIo;
+use tempfile::{TempDir, tempdir};
 
 use bib::Parser;
 
 pub struct BibtexRunner {
     bib_data: Vec<u8>,
-    io: MemoryIo,
-    engine: BibtexEngine,
+    dir: TempDir,
 }
 
 impl BibtexRunner {
-    pub fn new() -> BibtexRunner {
-        let mut io = MemoryIo::new(true); // stdout is allowed
-        io.create_entry("min.bst".as_ref(), include_bytes!("min.bst").to_vec());
-        io.create_entry("min.bib".as_ref(), Vec::new());
-        io.create_entry("min.aux".as_ref(), b"\\bibstyle{min}\n\\bibdata{min}\n\\citation{*}".to_vec());
+    pub fn new(data: &[u8]) -> BibtexRunner {
+        let dir = tempdir().unwrap();
+        let bst_path = dir.path().join("min.bst");
+        let bib_path = dir.path().join("min.bib");
+        let aux_path = dir.path().join("min.aux");
+
+        std::fs::write(&bst_path, &include_bytes!("min.bst")[..]).unwrap();
+        std::fs::write(&bib_path, data).unwrap();
+        std::fs::write(&aux_path, &b"\\bibstyle{min}\n\\bibdata{min}\n\\citation{*}"[..]).unwrap();
 
         BibtexRunner {
-            bib_data: Vec::new(),
-            io,
-            engine: BibtexEngine::new(),
+            bib_data: data.to_vec(),
+            dir,
         }
     }
 
     pub fn set_bib_input(&mut self, data: &[u8]) {
         self.bib_data = data.to_vec();
-        self.io.create_entry("min.bib".as_ref(), data.to_vec());
+        let bib_path = self.dir.path().join("min.bib");
+        std::fs::write(&bib_path, data).unwrap();
     }
 
     pub fn reference_output(&mut self) -> BibtexOutput {
-        let mut io_stack = IoStack::new(vec![&mut self.io]);
-        let _ = self.engine.process(
-            &mut io_stack,
-            &mut NoopIoEventBackend::new(),
-            &mut NoopStatusBackend::new(),
-            "min.aux",
-        );
+        let output = std::process::Command::new("bibtex")
+            .current_dir(self.dir.path())
+            .arg("min")
+            .output()
+            .expect("failed to run bibtex");
 
-        let stdout_data = BString::from(self.io.files.borrow()[self.io.stdout_key()].clone());
-        let bbl_data = BString::from(self.io.files.borrow()[OsStr::new("min.bbl")].clone());
+        let bbl_path = self.dir.path().join("min.bbl");
+        let bbl_data = BString::from(std::fs::read(&bbl_path).expect("couldn't read bbl"));
 
         BibtexOutput {
             // FIXME: for some reason I don't understand, our bst file is producing lots of blank
             // lines. So we filter them out, but this means we're also filtering out any entries
             // that truly have an empty key. So that isn't great.
             bbl_lines: bbl_data.lines().map(BString::from).filter(|s| !s.is_empty()).collect(),
-            stdout: trim_stdout(stdout_data.as_ref()),
+            stdout: trim_stdout((&output.stdout[..]).into()),
         }
     }
 
@@ -87,7 +83,13 @@ pub struct BibtexOutput {
 fn trim_stdout(bibtex_stdout: &BStr) -> BString {
     let mut ret = BString::from("");
 
-    for line in bibtex_stdout.lines() {
+    // This is pretty hacky, and only works if there's just one database file. We skip four lines:
+    //
+    // This is BibTeX, Version...
+    // The top-level auxiliary file: ...
+    // The style file: ...
+    // Database file #1: ...
+    for line in bibtex_stdout.lines().skip(4) {
         if line.starts_with(b"(There was") || line.starts_with(b"(There were") {
             // We've reached the end of the error messages, so return what we have.
             return ret;
@@ -132,8 +134,7 @@ mod tests {
     #[test]
     fn test_runner()
     {
-        let mut runner = BibtexRunner::new();
-        runner.set_bib_input(b"@article{mykey, title={mytitle},}");
+        let mut runner = BibtexRunner::new(b"@article{mykey, title={mytitle},}");
         let output = runner.reference_output();
         assert_eq!(output.bbl_lines, vec!["mykey".to_owned()]);
 

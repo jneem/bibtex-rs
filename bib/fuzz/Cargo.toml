@@ -10,7 +10,7 @@ edition = "2018"
 cargo-fuzz = true
 
 [dependencies]
-    tectonic_tester = { path = "../../tectonic_tester" }
+    system_bibtex_tester = { path = "../../system_bibtex_tester" }
     bib = { path = ".." }
 
 [dependencies.libfuzzer-sys]
@@ -23,3 +23,7 @@ members = ["."]
 [[bin]]
 name = "list_entries"
 path = "fuzz_targets/list_entries.rs"
+
+[[bin]]
+name = "list_entries_bin"
+path = "src/list_entries_bin.rs"

@@ -3,13 +3,13 @@ use common::input::is_white;
 use std::collections::HashMap;
 
 use crate::Entry;
-use crate::error::{Error, ErrorContext, ErrorKind, ErrorReporter, IdentifierKind};
+use crate::error::{ErrorContext, ErrorKind, IdentifierKind, Problem, ProblemReporter, WarningKind};
 
 /// A parser for `.bib` files.
 pub struct Parser<'read, 'error> {
     input: Input<'read>,
 
-    report: Box<dyn ErrorReporter + 'error>,
+    report: Box<dyn ProblemReporter + 'error>,
 
     // BibTex does space compression on macros at substitution time. We do it at declaration time,
     // so the values stored here have already had their spaces compressed.
@@ -22,10 +22,10 @@ pub struct Parser<'read, 'error> {
 
 impl<'read, 'error> Parser<'read, 'error> {
     /// Creates a new [`Parser`] that's ready to parse the input given in `read`.
-    pub fn new<R: std::io::BufRead + 'read, E: ErrorReporter + 'error>(read: R, error: E) -> Parser<'read, 'error> {
+    pub fn new<R: std::io::BufRead + 'read, E: ProblemReporter + 'error>(read: R, report: E) -> Parser<'read, 'error> {
         Parser {
             input: Input::from_reader(read),
-            report: Box::new(error),
+            report: Box::new(report),
             macros: HashMap::new(),
             cur_macro: None,
         }
@@ -161,7 +161,7 @@ impl<'read, 'error> Parser<'read, 'error> {
                 } else {
                     // The macro hasn't been defined yet, but we don't error out (because BibTex
                     // doesn't). Just issue a warning and substitute the empty string.
-                    // TODO: issue a warning
+                    self.report.report(&Problem::from_warning(WarningKind::UndefinedString(id), &self.input));
                     Ok(Vec::new())
                 }
             }
@@ -308,22 +308,22 @@ impl<'read, 'error> Parser<'read, 'error> {
     }
 
     // Having just consumed a '@', parse the rest of the item.
-    fn try_parse_item(&mut self) -> Result<Item, (Option<Item>, Error)> {
+    fn try_parse_item(&mut self) -> Result<Item, (Option<Item>, Problem)> {
         // BibTex treats an error here as occurring inside an entry, even though we haven't really
         // determined whether it's an entry or a command.
-        self.skip_white_space().map_err(|kind| (None, Error::with_context(kind, ErrorContext::Entry, &self.input)))?;
+        self.skip_white_space().map_err(|kind| (None, Problem::from_error_with_context(kind, ErrorContext::Entry, &self.input)))?;
         let kind = self
             .scan_identifier(|c| c == b'(' || c == b'{', IdentifierKind::EntryKind)
             // BibTex treats a missing entry type as being an error in an entry.
-            .map_err(|k| (None, Error::with_context(k, ErrorContext::Entry, &self.input)))?;
+            .map_err(|k| (None, Problem::from_error_with_context(k, ErrorContext::Entry, &self.input)))?;
 
         match &kind[..] {
             // TODO: check whether it's possible for bibtex to return partial preambles and strings
             // on error. Probably it is.
-            b"preamble" => self.parse_preamble().map_err(|k| (None, Error::with_context(k, ErrorContext::Command, &self.input))),
-            b"string" => self.parse_string().map_err(|k| (None, Error::with_context(k, ErrorContext::Command, &self.input))),
+            b"preamble" => self.parse_preamble().map_err(|k| (None, Problem::from_error_with_context(k, ErrorContext::Command, &self.input))),
+            b"string" => self.parse_string().map_err(|k| (None, Problem::from_error_with_context(k, ErrorContext::Command, &self.input))),
             b"comment" => Ok(self.parse_comment()),
-            _ => self.parse_entry(kind).map_err(|(e, k)| (e, Error::with_context(k, ErrorContext::Entry, &self.input))),
+            _ => self.parse_entry(kind).map_err(|(e, k)| (e, Problem::from_error_with_context(k, ErrorContext::Entry, &self.input))),
         }
     }
 
@@ -345,7 +345,7 @@ impl<'read, 'error> Parser<'read, 'error> {
 
             while !self.input.skip_to(|c| c == b'@') {
                 if let Err(e) = self.input.input_line() {
-                    self.report.error(&Error::new(e.into(), &self.input));
+                    self.report.report(&Problem::from_error(e.into(), &self.input));
                     continue;
                 } else if self.input.is_eof() {
                     return None;
@@ -360,7 +360,7 @@ impl<'read, 'error> Parser<'read, 'error> {
                     return Some(it);
                 }
                 Err((maybe_item, err)) => {
-                    self.report.error(&err);
+                    self.report.report(&err);
                     if maybe_item.is_some() {
                         return maybe_item;
                     }

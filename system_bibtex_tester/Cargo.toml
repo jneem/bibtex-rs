@@ -1,0 +1,11 @@
+[package]
+name = "system_bibtex_tester"
+version = "0.1.0"
+authors = ["Joe Neeman <joeneeman@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+bib = { path = "../bib/" }
+bstr = "0.2.8"
+tempfile = "3.1"
+
