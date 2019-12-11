@@ -73,7 +73,7 @@ impl BibtexRunner {
         }
         let ret = error_buf.is_empty();
         assert_eq!(keys, reference_output.bbl_lines);
-        assert_eq!(BString::from(error_buf), reference_output.stdout);
+        assert_eq!(BString::from(error_buf).to_ascii_lowercase(), reference_output.stdout.to_ascii_lowercase());
         ret
     }
 }

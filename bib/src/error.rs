@@ -111,6 +111,9 @@ pub enum ErrorContext {
 pub enum WarningKind {
     /// We tried to expand a string that wasn't defined.
     UndefinedString(Vec<u8>),
+    /// We encountered an unknown entry type. (The payload here is the key of the entry, not the
+    /// type.)
+    UnknownEntryType(Vec<u8>),
 }
 
 /// These are the two categories of problems that can occur while parsing a `.bib` file.
@@ -252,6 +255,7 @@ impl Problem {
 
         match kind {
             UndefinedString(ref name) => warn!("Warning--string name \"{}\" is undefined", xchrs(name)),
+            UnknownEntryType(ref key) => warn!("Warning--entry type for \"{}\" isn't style-file defined", xchrs(key)),
         }
 
         Ok(())

@@ -205,15 +205,6 @@ impl<'read> Input<'read> {
         self.advance_by(count);
         ret
     }
-
-    /// Makes the previous `count` bytes in the buffer lowercase.  This is a pretty strange thing
-    /// to do, but it's required to match BibTex's error messages (because BibTex does the same
-    /// thing: often, when it modifies identifiers to make them lowercase it uses the current line
-    /// buffer, and then it uses that same line buffer when reporting errors).
-    pub fn mark_last_lowercase(&mut self, count: usize) {
-        debug_assert!(count <= self.col);
-        self.line[(self.col - count)..self.col].make_ascii_lowercase();
-    }
 }
 
 #[cfg(test)]

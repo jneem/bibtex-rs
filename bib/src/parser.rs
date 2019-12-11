@@ -18,6 +18,9 @@ pub struct Parser<'read, 'error> {
     // Recursive macros are not allowed. In order to output an informative error message, when we
     // are in the middle of parsing a macro we store its name here.
     cur_macro: Option<Vec<u8>>,
+
+    entry_type_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
+    field_name_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
 }
 
 impl<'read, 'error> Parser<'read, 'error> {
@@ -28,7 +31,25 @@ impl<'read, 'error> Parser<'read, 'error> {
             report: Box::new(report),
             macros: HashMap::new(),
             cur_macro: None,
+            entry_type_checker: None,
+            field_name_checker: None,
         }
+    }
+
+    /// Provides a function for checking whether the entries are of a known type.
+    ///
+    /// Whenever the provided function returns false, a warning will be issued.
+    pub fn with_entry_type_checker<F: FnMut(&[u8]) -> bool + 'static>(mut self, f: F) -> Self {
+        self.entry_type_checker = Some(Box::new(f));
+        self
+    }
+
+    /// Provides a function for checking whether the field names are known.
+    ///
+    /// Whenever the provided function returns false, a warning will be issued.
+    pub fn with_field_name_checker<F: FnMut(&[u8]) -> bool + 'static>(mut self, f: F) -> Self {
+        self.field_name_checker = Some(Box::new(f));
+        self
     }
 
     /// Returns an iterator over all the entries (and errors) in this `.bib` file.
@@ -67,7 +88,6 @@ impl<'read, 'error> Parser<'read, 'error> {
         } else if !self.input.is_eol() && !is_white(self.input.current()) && !next_char(self.input.current()) {
             Err(ErrorKind::InvalidIdChar(kind))
         } else {
-            self.input.mark_last_lowercase(id.len());
             Ok(id)
         }
     }
@@ -279,6 +299,12 @@ impl<'read, 'error> Parser<'read, 'error> {
         } else {
             self.input.scan_while(|b| !is_white(b) && b != b',' && b != b'}')
         };
+
+        if let Some(ref mut check) = self.entry_type_checker {
+            if !check(&kind) {
+                self.report.report(&Problem::from_warning(WarningKind::UnknownEntryType(key.clone()), &self.input));
+            }
+        }
 
         // TODO: BibTex maintains a list of entries that were cited in the .aux file. While
         // parsing, it skips over unneeded entries. We should also have some way of doing that.

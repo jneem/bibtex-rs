@@ -2,6 +2,7 @@ use bstr::{BStr, BString, ByteSlice};
 use tempfile::{TempDir, tempdir};
 
 use bib::Parser;
+use bib::error::ProblemKind;
 
 pub struct BibtexRunner {
     bib_data: Vec<u8>,
@@ -57,6 +58,7 @@ impl BibtexRunner {
         let mut errors = Vec::new();
         let mut error_buf = Vec::new();
         let parser = Parser::new(&self.bib_data[..], &mut errors);
+
         let mut keys = Vec::new();
         for entry in parser.entries() {
             if !entry.key.is_empty() { 
@@ -65,11 +67,17 @@ impl BibtexRunner {
             }
         }
         for err in errors {
-            err.write_compatible_errmsg(&mut error_buf, "min.bib").unwrap();
+            // FIXME: We only check for equality of the error messages, not the warning messages.
+            // That's because some of the warning messages that we want to test for don't show up
+            // in bibtex. For example, bibtex doesn't do macro substitution for field types it
+            // doesn't know, and so it doesn't raise warnings for those.
+            if let ProblemKind::Error(_) = err.kind {
+                err.write_compatible_errmsg(&mut error_buf, "min.bib").unwrap();
+            }
         }
         let ret = error_buf.is_empty();
         assert_eq!(keys, reference_output.bbl_lines);
-        assert_eq!(BString::from(error_buf), reference_output.stdout);
+        assert_eq!(BString::from(error_buf).to_ascii_lowercase(), reference_output.stdout.to_ascii_lowercase());
         ret
     }
 }
@@ -79,9 +87,10 @@ pub struct BibtexOutput {
     pub stdout: BString,
 }
 
-// Trim uninteresting parts from the stdout (namely, version printing and total number of errors)
+// Trim uninteresting parts from the stdout (namely, version printing, warnings, and total number of errors)
 fn trim_stdout(bibtex_stdout: &BStr) -> BString {
     let mut ret = BString::from("");
+    let mut in_error = false;
 
     // This is pretty hacky, and only works if there's just one database file. We skip four lines:
     //
@@ -95,8 +104,16 @@ fn trim_stdout(bibtex_stdout: &BStr) -> BString {
             return ret;
         }
 
-        ret.extend_from_slice(line);
-        ret.push(b'\n');
+        if line.find(b"---").is_some() {
+            in_error = true;
+        } else if line.find(b"Warning--").is_some() {
+            in_error = false;
+        }
+
+        if in_error {
+            ret.extend_from_slice(line);
+            ret.push(b'\n');
+        }
     }
 
     ret
