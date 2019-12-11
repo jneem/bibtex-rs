@@ -1,5 +1,16 @@
+//! This crate contains some utilities to verify the behavior of our bibtex implementation by
+//! comparing it to the reference implementation contained in tectonic.
+//!
+//! Note that the `system_bibtex_tester` crate contains utilities for comparing to the reference
+//! implementation in the bibtex binary installed on the current system. The main advantage of this
+//! crate over that one is that it's faster, and it compares warning messages in addition to error
+//! messages. On the other hand, tectonic has some known memory leaks.  Overall, this one is
+//! intended for handwritten tests whereas the other one is intended for fuzzing.
+
 use bstr::{BStr, BString, ByteSlice};
+use std::collections::HashSet;
 use std::ffi::OsStr;
+use std::ops::DerefMut;
 use tectonic::BibtexEngine;
 use tectonic::engines::NoopIoEventBackend;
 use tectonic::io::stack::IoStack;
@@ -59,8 +70,18 @@ impl BibtexRunner {
     pub fn check_ours(&mut self) -> bool {
         let reference_output = self.reference_output();
         let mut errors = Vec::new();
-        let mut error_buf = Vec::new();
-        let parser = Parser::new(&self.bib_data[..], &mut errors);
+        let mut error_buf = BString::from("");
+
+        // These need to match the ENTRY command in the included .bst file.
+        let mut known_fields = HashSet::new();
+        known_fields.insert(&b"field"[..]);
+        known_fields.insert(b"title");
+        known_fields.insert(b"author");
+
+        let parser = Parser::new(&self.bib_data[..], &mut errors)
+            .with_entry_type_checker(|s| s == b"article")
+            .with_field_name_checker(move |s| known_fields.get(s).is_some());
+
         let mut keys = Vec::new();
         for entry in parser.entries() {
             if !entry.key.is_empty() { 
@@ -69,11 +90,12 @@ impl BibtexRunner {
             }
         }
         for err in errors {
-            err.write_compatible_errmsg(&mut error_buf, "min.bib").unwrap();
+            err.write_compatible_errmsg(error_buf.deref_mut(), "min.bib").unwrap();
         }
         let ret = error_buf.is_empty();
+        println!("{}", error_buf);
         assert_eq!(keys, reference_output.bbl_lines);
-        assert_eq!(BString::from(error_buf).to_ascii_lowercase(), reference_output.stdout.to_ascii_lowercase());
+        assert_eq!(BString::from(error_buf.to_ascii_lowercase()), BString::from(reference_output.stdout.to_ascii_lowercase()));
         ret
     }
 }

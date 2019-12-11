@@ -77,7 +77,7 @@ impl BibtexRunner {
         }
         let ret = error_buf.is_empty();
         assert_eq!(keys, reference_output.bbl_lines);
-        assert_eq!(BString::from(error_buf).to_ascii_lowercase(), reference_output.stdout.to_ascii_lowercase());
+        assert_eq!(BString::from(error_buf.to_ascii_lowercase()), BString::from(reference_output.stdout.to_ascii_lowercase()));
         ret
     }
 }
@@ -104,10 +104,18 @@ fn trim_stdout(bibtex_stdout: &BStr) -> BString {
             return ret;
         }
 
-        if line.find(b"---").is_some() {
-            in_error = true;
-        } else if line.find(b"Warning--").is_some() {
+        if line.starts_with(b"Warning--") {
             in_error = false;
+        } else if line.find(b"---").is_some()
+            && (line.starts_with(b"Illegal")
+                || line.starts_with(b"I was expecting")
+                || line.starts_with(b"Missing \"")
+                || line.starts_with(b"You're missing")
+                || line.starts_with(b"Unbalanced braces")
+                || line[2..].starts_with(b"\" immediately follows")
+            )
+        {
+            in_error = true;
         }
 
         if in_error {

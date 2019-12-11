@@ -4,5 +4,9 @@
 
 @string{macroname = "macroval"}
 
-@string{macroname = "redefined macroval"}
+@string{macroname = "redefined macroval, but this isn't actually a warning"}
+
+@string{mynewval = "Recursion not allowed" # mynewval }
+
+@string{macroname = "This also counts as recursion" # macroname }
 

@@ -15,10 +15,6 @@ pub struct Parser<'read, 'error> {
     // so the values stored here have already had their spaces compressed.
     macros: HashMap<Vec<u8>, Vec<u8>>,
 
-    // Recursive macros are not allowed. In order to output an informative error message, when we
-    // are in the middle of parsing a macro we store its name here.
-    cur_macro: Option<Vec<u8>>,
-
     entry_type_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
     field_name_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
 }
@@ -30,7 +26,6 @@ impl<'read, 'error> Parser<'read, 'error> {
             input: Input::from_reader(read),
             report: Box::new(report),
             macros: HashMap::new(),
-            cur_macro: None,
             entry_type_checker: None,
             field_name_checker: None,
         }
@@ -156,10 +151,14 @@ impl<'read, 'error> Parser<'read, 'error> {
     // - a brace-balanced string delimited by either {} or "".
     //
     // This is specified starting at WEB section number 250 of the BibTex source.
-    fn parse_field_token(&mut self, right_delim: u8) -> Result<Vec<u8>, ErrorKind> {
+    //
+    // For more on `cur_macro` and `known_field`, see [`parse_field_value`].
+    fn parse_field_token(&mut self, right_delim: u8, cur_macro: Option<&[u8]>, known_field: bool) -> Result<Vec<u8>, ErrorKind> {
         match self.input.current() {
             b'{' => {
                 self.input.advance();
+                // TODO: as an optimization, we could avoid allocating memory here (and below) when
+                // known_field is false.
                 self.parse_balanced_brace_string(b'}')
             }
             b'"' => {
@@ -171,12 +170,14 @@ impl<'read, 'error> Parser<'read, 'error> {
             }
             _ => {
                 let id = self.scan_identifier(|c| c == b',' || c == b'#' || c == right_delim, IdentifierKind::FieldPart)?;
-                if Some(&id) == self.cur_macro.as_ref() {
-                    // TODO: we need to emit an error, but without aborting the current function.
-                    // What is the BibTex behavior in this case?
-                    unimplemented!()
-                }
-                if let Some(val) = self.macros.get(&id) {
+                if !known_field {
+                    Ok(Vec::new())
+                } else if Some(&id[..]) == cur_macro {
+                    // Someone attempted a recursive macro definition. Issue a warning and
+                    // substitute the empty string.
+                    self.report.report(&Problem::from_warning(WarningKind::RecursiveString(id), &self.input));
+                    Ok(Vec::new())
+                } else if let Some(val) = self.macros.get(&id) {
                     Ok(val.to_owned())
                 } else {
                     // The macro hasn't been defined yet, but we don't error out (because BibTex
@@ -194,14 +195,23 @@ impl<'read, 'error> Parser<'read, 'error> {
     //
     // Field values appear in the @preamble command, the right hand side of a @string command, and
     // as the field values in an entry.
-    fn parse_field_value(&mut self, right_delim: u8) -> Result<Vec<u8>, ErrorKind> {
-        let mut ret = self.parse_field_token(right_delim)?;
+    //
+    // If the `cur_macro` parameter is present, it means that we are currently defining that macro,
+    // and that therefore this macro is not allowed to appear in the field value.
+    //
+    // If `known_field` is false, it means that we are parsing the field value for a field type
+    // that we don't know about. This means that we need to parse it correctly, but we don't need
+    // to return a reasonable value (so that, for example, we don't need to expand macros or
+    // allocate memory).
+    fn parse_field_value(&mut self, right_delim: u8, cur_macro: Option<&[u8]>, known_field: bool) -> Result<Vec<u8>, ErrorKind> {
+        let mut ret = self.parse_field_token(right_delim, cur_macro, known_field)?;
         self.skip_white_space()?;
         while self.input.current() == b'#' {
             self.input.advance();
             self.skip_white_space()?;
-            let next = self.parse_field_token(right_delim)?;
+            let next = self.parse_field_token(right_delim, cur_macro, known_field)?;
             ret.extend_from_slice(&next[..]);
+            self.skip_white_space()?;
         }
         Ok(ret)
     }
@@ -223,7 +233,7 @@ impl<'read, 'error> Parser<'read, 'error> {
         self.skip_white_space()?;
         let closing_delim = self.parse_open_delim()?;
         self.skip_white_space()?;
-        let ret = self.parse_field_value(closing_delim)?;
+        let ret = self.parse_field_value(closing_delim, None, true)?;
         self.skip_white_space()?;
         self.expect(closing_delim, ErrorKind::UnterminatedPreamble(closing_delim))?;
         Ok(Item::Preamble(ret))
@@ -239,11 +249,12 @@ impl<'read, 'error> Parser<'read, 'error> {
         self.skip_white_space()?;
         self.expect(b'=', ErrorKind::ExpectedEquals)?;
         self.skip_white_space()?;
-        let val = self.parse_field_value(closing_delim)?;
+        let val = self.parse_field_value(closing_delim, Some(&key), true)?;
         self.skip_white_space()?;
         self.expect(closing_delim, ErrorKind::UnterminatedString(closing_delim))?;
 
-        // TODO: do the bit about checking if it's already defined, or recursively defined, etc.
+        // We don't need to check if the macro was already defined. BibTex just overwrites the
+        // value silently.
         self.macros.insert(key.clone(), val.clone());
 
         Ok(Item::String { _key: key, _val: val })
@@ -269,15 +280,13 @@ impl<'read, 'error> Parser<'read, 'error> {
             return Ok(());
         }
 
-        // TODO: BibTex checks whether the field name is a valid one before storing it. That
-        // isn't really possible in a standalone .bib parser (because we have to parse the .bst
-        // file to find the supported field names), but it might be worth supporting some sort
-        // of field-filtering functionality.
         let field_name = self.scan_identifier(|c| c == b'=', IdentifierKind::FieldName)?;
+        let known_field = self.field_name_checker.as_mut().map(|f| f(&field_name)) != Some(false);
+
         self.skip_white_space()?;
         self.expect(b'=', ErrorKind::ExpectedEquals)?;
         self.skip_white_space()?;
-        let field_value = self.parse_field_value(closing_delim)?;
+        let field_value = self.parse_field_value(closing_delim, None, known_field)?;
 
         // BibTex silently overwrites duplicate fields; see WEB section 245.
         entry.fields.insert(field_name, field_value);
@@ -452,14 +461,14 @@ mod tests {
             // Even though we're testing balanced braces, it's more convenient to call
             // parse_field_token, because parse_balanced_brace_string requires the opening
             // delimiter to already be consumed.
-            let out = p.parse_field_token(b'}').unwrap();
+            let out = p.parse_field_token(b'}', None, true).unwrap();
             assert_eq!(output, &out[..]);
         }
 
         fn expect_error(input: &'static [u8], err: ErrorKind) {
             let mut p = parser(input);
             p.skip_white_space().unwrap();
-            assert_eq!(p.parse_field_token(b'}').unwrap_err(), err);
+            assert_eq!(p.parse_field_token(b'}', None, true).unwrap_err(), err);
         }
 
         expect(b"{blah}after", b"blah");

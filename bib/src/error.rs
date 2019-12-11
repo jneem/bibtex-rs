@@ -109,6 +109,8 @@ pub enum ErrorContext {
 /// rest of the input until a blank line is encountered.
 #[derive(Clone, Debug)]
 pub enum WarningKind {
+    /// We tried to expand a string during its own definition.
+    RecursiveString(Vec<u8>),
     /// We tried to expand a string that wasn't defined.
     UndefinedString(Vec<u8>),
     /// We encountered an unknown entry type. (The payload here is the key of the entry, not the
@@ -254,6 +256,7 @@ impl Problem {
         };
 
         match kind {
+            RecursiveString(ref name) => warn!("Warning--string name \"{}\" is used in its own definition", xchrs(name)),
             UndefinedString(ref name) => warn!("Warning--string name \"{}\" is undefined", xchrs(name)),
             UnknownEntryType(ref key) => warn!("Warning--entry type for \"{}\" isn't style-file defined", xchrs(key)),
         }

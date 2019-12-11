@@ -15,6 +15,7 @@ list_entries_failure!(unterminated_string, "unterminated_string.bib");
 list_entries_failure!(unbalanced_braces, "unbalanced_braces.bib");
 list_entries_failure!(error_cases, "error_cases.bib");
 list_entries_failure!(string_warnings, "string_warnings.bib");
+list_entries_failure!(field_warnings, "field_warnings.bib");
 
 
 // This currently fails, because we aren't detecting duplicate keys.
