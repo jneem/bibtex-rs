@@ -23,6 +23,7 @@ pub struct BibtexRunner {
     bib_data: Vec<u8>,
     io: MemoryIo,
     engine: BibtexEngine,
+    citation_list: Option<Vec<Vec<u8>>>,
 }
 
 impl BibtexRunner {
@@ -36,12 +37,28 @@ impl BibtexRunner {
             bib_data: Vec::new(),
             io,
             engine: BibtexEngine::new(),
+            citation_list: None,
         }
     }
 
     pub fn set_bib_input(&mut self, data: &[u8]) {
         self.bib_data = data.to_vec();
         self.io.create_entry("min.bib".as_ref(), data.to_vec());
+    }
+
+    pub fn set_citation_list(&mut self, citations: &[&'static [u8]]) {
+        self.citation_list = Some(citations.iter().map(|x| x.to_vec()).collect());
+        let mut aux_data = Vec::new();
+
+        use std::io::Write;
+        writeln!(&mut aux_data, "\\bibstyle{{min}}").unwrap();
+        writeln!(&mut aux_data, "\\bibdata{{min}}").unwrap();
+        for c in self.citation_list.as_ref().unwrap() {
+            // NOTE: this probably only works as expected if the keys are all ASCII. Since we
+            // control the testing data, this is ok for now.
+            writeln!(&mut aux_data, "\\citation{{{}}}", BString::from(&c[..])).unwrap();
+        }
+        self.io.create_entry("min.aux".as_ref(), aux_data);
     }
 
     pub fn reference_output(&mut self) -> BibtexOutput {
@@ -78,9 +95,13 @@ impl BibtexRunner {
         known_fields.insert(b"title");
         known_fields.insert(b"author");
 
-        let parser = Parser::new(&self.bib_data[..], &mut errors)
+        let mut parser = Parser::new(&self.bib_data[..], &mut errors)
             .with_entry_type_checker(|s| s == b"article")
             .with_field_name_checker(move |s| known_fields.get(s).is_some());
+
+        if let Some(ref citation_list) = self.citation_list {
+            parser = parser.with_citation_list(citation_list, 2);
+        }
 
         let mut keys = Vec::new();
         for entry in parser.entries() {
@@ -89,6 +110,7 @@ impl BibtexRunner {
                 keys.push(String::from_utf8(entry.key).unwrap())
             }
         }
+        drop(parser); // Because it's borrowing errors.
         for err in errors {
             err.write_compatible_errmsg(error_buf.deref_mut(), "min.bib").unwrap();
         }
@@ -131,7 +153,17 @@ macro_rules! list_entries_success {
             runner.set_bib_input(include_bytes!($bib_file));
             assert!(runner.check_ours());
         }
-    }
+    };
+
+    ($test_name:ident, $bib_file:expr, $citations:expr) => {
+        #[test]
+        fn $test_name() {
+            let mut runner = $crate::BibtexRunner::new();
+            runner.set_bib_input(include_bytes!($bib_file));
+            runner.set_citation_list(&$citations[..]);
+            assert!(runner.check_ours());
+        }
+    };
 }
 
 #[macro_export]
@@ -143,7 +175,17 @@ macro_rules! list_entries_failure {
             runner.set_bib_input(include_bytes!($bib_file));
             assert!(!runner.check_ours());
         }
-    }
+    };
+
+    ($test_name:ident, $bib_file:expr, $citations:expr) => {
+        #[test]
+        fn $test_name() {
+            let mut runner = $crate::BibtexRunner::new();
+            runner.set_bib_input(include_bytes!($bib_file));
+            runner.set_citation_list(&$citations[..]);
+            assert!(!runner.check_ours());
+        }
+    };
 }
 
 

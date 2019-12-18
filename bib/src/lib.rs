@@ -22,7 +22,7 @@
 //! }
 //! "#;
 //!
-//! let parser = Parser::new(bib_data.as_bytes(), ());
+//! let mut parser = Parser::new(bib_data.as_bytes(), ());
 //! let entries = parser.entries().collect::<Vec<_>>();
 //!
 //! assert_eq!(&entries[0].fields[&b"author"[..]], b"Herman Melville");
@@ -31,9 +31,9 @@
 //!
 //! # Compatibility
 //!
-//! This crate aims to be 100% compatible with standard BibTex, including all the weird corner
-//! cases. It is capable of producing error messages that are identical to BibTex's, and in the
-//! future will also support identical warning messages and other terminal output.
+//! This crate aims to be compatible with standard BibTex, including all the weird corner cases. It
+//! is capable of producing error messages that are identical to BibTex's, and in the future will
+//! also support identical warning messages and other terminal output.
 //!
 //! There is one family of caveats regarding BibTex compatibility: BibTex *always* reads a `.bib`
 //! file in the context of a `.aux` file and a `.bst` file; it has no standalone parser. This
@@ -52,6 +52,7 @@
 
 use std::collections::HashMap;
 
+mod citation_list;
 pub mod error;
 mod parser;
 

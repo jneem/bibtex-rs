@@ -1,0 +1,20 @@
+@article{intro,
+    title = "This tests the entry-filtering functionality. Only key1, key2, key3 are recognized keys",
+    author = "This undefined macro should not be warned about" # foo,
+}
+
+@article{key1,
+    author = "This undefined macro should be warned about" # foo,
+}
+
+@article{unrecognizedkey,
+    title = "This is a parse error, so it should still be an error}",
+}
+
+@article{key2,
+    title = "Also a parse error}",
+}
+
+@article{key3,
+    title = "TODO: once we're capable of issuing warnings for entries that were in the citation list but not the database, we should delete this entry"
+}

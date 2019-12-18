@@ -3,7 +3,24 @@ use common::input::is_white;
 use std::collections::HashMap;
 
 use crate::Entry;
+use crate::citation_list::{CitationList, CrossrefList};
 use crate::error::{ErrorContext, ErrorKind, IdentifierKind, Problem, ProblemReporter, WarningKind};
+
+trait ResultExt<T> {
+    fn or_bail(self, p: &mut Parser, ctxt: ErrorContext) -> Option<T>;
+}
+
+impl<T> ResultExt<T> for Result<T, ErrorKind> {
+    fn or_bail(self, p: &mut Parser, ctxt: ErrorContext) -> Option<T> {
+        match self {
+            Ok(t) => Some(t),
+            Err(e) => {
+                p.report.report(&Problem::from_error_with_context(e, ctxt, &p.input));
+                None
+            }
+        }
+    }
+}
 
 /// A parser for `.bib` files.
 pub struct Parser<'read, 'error> {
@@ -17,6 +34,20 @@ pub struct Parser<'read, 'error> {
 
     entry_type_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
     field_name_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
+
+    citation_list: CitationList,
+    // Was the citation list explicitly initialized? If not, we default to allowing all citations.
+    citation_list_initialized: bool,
+    crossref_list: CrossrefList,
+
+    // Entries can contain a `crossref` field, like
+    // @article{article_key, title="Blah", crossref=book_key}
+    // @book{book_key, editor="Me"}
+    //
+    // While processing the bibtex file, we keep track of all crossreferenced entries (i.e.
+    // book_key in the example above). Those that are referenced more than `min_crossrefs` will
+    // appear in the bibliography even if they were not otherwise included.
+    min_crossrefs: usize,
 }
 
 impl<'read, 'error> Parser<'read, 'error> {
@@ -28,6 +59,10 @@ impl<'read, 'error> Parser<'read, 'error> {
             macros: HashMap::new(),
             entry_type_checker: None,
             field_name_checker: None,
+            citation_list: Default::default(),
+            citation_list_initialized: false,
+            crossref_list: Default::default(),
+            min_crossrefs: 0,
         }
     }
 
@@ -47,8 +82,23 @@ impl<'read, 'error> Parser<'read, 'error> {
         self
     }
 
-    /// Returns an iterator over all the entries (and errors) in this `.bib` file.
-    pub fn entries(self) -> EntriesIter<'read, 'error> {
+    /// Provides this parser with a list of all interesting citation keys.
+    ///
+    /// When iterating over entries, the parser will ignore all entries belonging to this list,
+    /// unless they were crossreferenced at least `min_crossrefs` times by something in this list.
+    pub fn with_citation_list<I: AsRef<[u8]>, T: IntoIterator<Item=I>>(mut self, list: T, min_crossrefs: usize) -> Self {
+        self.citation_list.initialize_with(list.into_iter().map(|xs| xs.as_ref().to_vec()).collect::<Vec<_>>());
+        self.citation_list_initialized = true;
+        self.min_crossrefs = min_crossrefs;
+        self
+    }
+
+    /// Returns an iterator over all the entries in this `.bib` file.
+    pub fn entries<'parser>(&'parser mut self) -> EntriesIter<'parser, 'read, 'error> {
+        if !self.citation_list_initialized {
+            self.citation_list_initialized = true;
+            self.citation_list.initialize_with(vec![vec![b'*']]);
+        }
         EntriesIter {
             parser: self,
         }
@@ -152,13 +202,13 @@ impl<'read, 'error> Parser<'read, 'error> {
     //
     // This is specified starting at WEB section number 250 of the BibTex source.
     //
-    // For more on `cur_macro` and `known_field`, see [`parse_field_value`].
-    fn parse_field_token(&mut self, right_delim: u8, cur_macro: Option<&[u8]>, known_field: bool) -> Result<Vec<u8>, ErrorKind> {
+    // For more on `cur_macro` and `ignore_field`, see [`parse_field_value`].
+    fn parse_field_token(&mut self, right_delim: u8, cur_macro: Option<&[u8]>, ignore_field: bool) -> Result<Vec<u8>, ErrorKind> {
         match self.input.current() {
             b'{' => {
                 self.input.advance();
                 // TODO: as an optimization, we could avoid allocating memory here (and below) when
-                // known_field is false.
+                // ignore_field is true.
                 self.parse_balanced_brace_string(b'}')
             }
             b'"' => {
@@ -170,7 +220,7 @@ impl<'read, 'error> Parser<'read, 'error> {
             }
             _ => {
                 let id = self.scan_identifier(|c| c == b',' || c == b'#' || c == right_delim, IdentifierKind::FieldPart)?;
-                if !known_field {
+                if ignore_field {
                     Ok(Vec::new())
                 } else if Some(&id[..]) == cur_macro {
                     // Someone attempted a recursive macro definition. Issue a warning and
@@ -199,17 +249,17 @@ impl<'read, 'error> Parser<'read, 'error> {
     // If the `cur_macro` parameter is present, it means that we are currently defining that macro,
     // and that therefore this macro is not allowed to appear in the field value.
     //
-    // If `known_field` is false, it means that we are parsing the field value for a field type
+    // If `ignore_field` is true, it means that we are parsing the field value for a field type
     // that we don't know about. This means that we need to parse it correctly, but we don't need
     // to return a reasonable value (so that, for example, we don't need to expand macros or
     // allocate memory).
-    fn parse_field_value(&mut self, right_delim: u8, cur_macro: Option<&[u8]>, known_field: bool) -> Result<Vec<u8>, ErrorKind> {
-        let mut ret = self.parse_field_token(right_delim, cur_macro, known_field)?;
+    fn parse_field_value(&mut self, right_delim: u8, cur_macro: Option<&[u8]>, ignore_field: bool) -> Result<Vec<u8>, ErrorKind> {
+        let mut ret = self.parse_field_token(right_delim, cur_macro, ignore_field)?;
         self.skip_white_space()?;
         while self.input.current() == b'#' {
             self.input.advance();
             self.skip_white_space()?;
-            let next = self.parse_field_token(right_delim, cur_macro, known_field)?;
+            let next = self.parse_field_token(right_delim, cur_macro, ignore_field)?;
             ret.extend_from_slice(&next[..]);
             self.skip_white_space()?;
         }
@@ -233,7 +283,7 @@ impl<'read, 'error> Parser<'read, 'error> {
         self.skip_white_space()?;
         let closing_delim = self.parse_open_delim()?;
         self.skip_white_space()?;
-        let ret = self.parse_field_value(closing_delim, None, true)?;
+        let ret = self.parse_field_value(closing_delim, None, false)?;
         self.skip_white_space()?;
         self.expect(closing_delim, ErrorKind::UnterminatedPreamble(closing_delim))?;
         Ok(Item::Preamble(ret))
@@ -249,7 +299,7 @@ impl<'read, 'error> Parser<'read, 'error> {
         self.skip_white_space()?;
         self.expect(b'=', ErrorKind::ExpectedEquals)?;
         self.skip_white_space()?;
-        let val = self.parse_field_value(closing_delim, Some(&key), true)?;
+        let val = self.parse_field_value(closing_delim, Some(&key), false)?;
         self.skip_white_space()?;
         self.expect(closing_delim, ErrorKind::UnterminatedString(closing_delim))?;
 
@@ -268,7 +318,9 @@ impl<'read, 'error> Parser<'read, 'error> {
 
     // Parses a single key-value pair, and adds it to the entry. We expect the current input
     // character to be a comma (the one coming after the previous key-value pair).
-    fn parse_entry_field(&mut self, entry: &mut Entry, closing_delim: u8) -> Result<(), ErrorKind> {
+    //
+    // If `ignore_it` is true, we parse the field don't actually store it in the entry.
+    fn parse_entry_field(&mut self, entry: &mut Entry, closing_delim: u8, ignore_it: bool) -> Result<(), ErrorKind> {
         // Even though we expect a comma, let's pretend a closing delimiter would be ok too. This
         // is to match BibTex's error messages.
         self.expect_one_of_two(b',', closing_delim)?;
@@ -281,26 +333,32 @@ impl<'read, 'error> Parser<'read, 'error> {
         }
 
         let field_name = self.scan_identifier(|c| c == b'=', IdentifierKind::FieldName)?;
-        let known_field = self.field_name_checker.as_mut().map(|f| f(&field_name)) != Some(false);
+        let ignore_field = ignore_it || self.field_name_checker.as_mut().map(|f| f(&field_name)) == Some(false);
 
         self.skip_white_space()?;
         self.expect(b'=', ErrorKind::ExpectedEquals)?;
         self.skip_white_space()?;
-        let field_value = self.parse_field_value(closing_delim, None, known_field)?;
+        let field_value = self.parse_field_value(closing_delim, None, ignore_field)?;
 
         // BibTex silently overwrites duplicate fields; see WEB section 245.
-        entry.fields.insert(field_name, field_value);
+        if !ignore_field {
+            entry.fields.insert(field_name, field_value);
+        }
         Ok(())
     }
 
-    /// Parses an entry.
+    /// Parses an entry, reporting errors if there are any.
     ///
-    /// If an error was encountered in the middle of reading an entry, we might return a partial
-    /// entry along with the error.
-    fn parse_entry(&mut self, kind: Vec<u8>) -> Result<Item, (Option<Item>, ErrorKind)> {
-        self.skip_white_space().map_err(|e| (None, e))?;
-        let closing_delim = self.parse_open_delim().map_err(|e| (None, e))?;
-        self.skip_white_space().map_err(|e| (None, e))?;
+    /// Note that if an error occurs in the middle of an entry, we return whatever part of the
+    /// entry that we successfully parsed.
+    ///
+    /// If the entry key is not on the citation list, we will return `None` even if there are no
+    /// errors.
+    fn parse_entry(&mut self, kind: Vec<u8>) -> Option<Item> {
+        self.skip_white_space().or_bail(self, ErrorContext::Entry)?;
+        let closing_delim = self.parse_open_delim().or_bail(self, ErrorContext::Entry)?;
+        self.skip_white_space().or_bail(self, ErrorContext::Entry)?;
+
         // The allowed characters in the key of a bibtex entry depend on the delimiter. When
         // using (), the key is even allowed to contain ')'.
         let key = if closing_delim == b')' {
@@ -315,50 +373,53 @@ impl<'read, 'error> Parser<'read, 'error> {
             }
         }
 
-        // TODO: BibTex maintains a list of entries that were cited in the .aux file. While
-        // parsing, it skips over unneeded entries. We should also have some way of doing that.
-
-        // TODO: WEB sections 268 and 269 mention crossrefs, which I don't understand yet.
-
         let mut ret = Entry {
             kind,
             key,
             fields: HashMap::new(),
         };
 
-        // We can't use map_err here and below, because borrowck would require us to clone `ret`.
-        if let Err(e) = self.skip_white_space() {
-            return Err((Some(Item::Entry(ret)), e))
+        if self.skip_white_space().or_bail(self, ErrorContext::Entry).is_none() {
+            return Some(Item::Entry(ret));
         }
+        let ignore_it = !self.citation_list.contains(&ret.key);
         while self.input.current() != closing_delim {
-            if let Err(e) = self.parse_entry_field(&mut ret, closing_delim) {
-                return Err((Some(Item::Entry(ret)), e));
+            if self.parse_entry_field(&mut ret, closing_delim, ignore_it)
+                    .or_bail(self, ErrorContext::Entry)
+                    .is_none() {
+                return if ignore_it {
+                    None
+                } else {
+                    Some(Item::Entry(ret))
+                };
             }
         }
 
         // Advance past the closing delimiter.
         self.input.advance();
 
-        Ok(Item::Entry(ret))
+        if ignore_it {
+            None
+        } else {
+            Some(Item::Entry(ret))
+        }
     }
 
     // Having just consumed a '@', parse the rest of the item.
-    fn try_parse_item(&mut self) -> Result<Item, (Option<Item>, Problem)> {
+    fn try_parse_item(&mut self) -> Option<Item> {
         // BibTex treats an error here as occurring inside an entry, even though we haven't really
         // determined whether it's an entry or a command.
-        self.skip_white_space().map_err(|kind| (None, Problem::from_error_with_context(kind, ErrorContext::Entry, &self.input)))?;
-        let kind = self
-            .scan_identifier(|c| c == b'(' || c == b'{', IdentifierKind::EntryKind)
-            // BibTex treats a missing entry type as being an error in an entry.
-            .map_err(|k| (None, Problem::from_error_with_context(k, ErrorContext::Entry, &self.input)))?;
+        self.skip_white_space().or_bail(self, ErrorContext::Entry)?;
+        let kind = self.scan_identifier(|c| c == b'(' || c == b'{', IdentifierKind::EntryKind)
+            .or_bail(self, ErrorContext::Entry)?;
 
         match &kind[..] {
             // TODO: check whether it's possible for bibtex to return partial preambles and strings
             // on error. Probably it is.
-            b"preamble" => self.parse_preamble().map_err(|k| (None, Problem::from_error_with_context(k, ErrorContext::Command, &self.input))),
-            b"string" => self.parse_string().map_err(|k| (None, Problem::from_error_with_context(k, ErrorContext::Command, &self.input))),
-            b"comment" => Ok(self.parse_comment()),
-            _ => self.parse_entry(kind).map_err(|(e, k)| (e, Problem::from_error_with_context(k, ErrorContext::Entry, &self.input))),
+            b"preamble" => self.parse_preamble().or_bail(self, ErrorContext::Command),
+            b"string" => self.parse_string().or_bail(self, ErrorContext::Command),
+            b"comment" => Some(self.parse_comment()),
+            _ => self.parse_entry(kind),
         }
     }
 
@@ -391,15 +452,8 @@ impl<'read, 'error> Parser<'read, 'error> {
             self.input.advance();
 
             match self.try_parse_item() {
-                Ok(it) => {
-                    return Some(it);
-                }
-                Err((maybe_item, err)) => {
-                    self.report.report(&err);
-                    if maybe_item.is_some() {
-                        return maybe_item;
-                    }
-                }
+                Some(it) => return Some(it),
+                None => {},
             }
         }
     }
@@ -420,11 +474,11 @@ impl<'read, 'error> Parser<'read, 'error> {
 }
 
 /// An iterator over bibtex entries.
-pub struct EntriesIter<'read, 'error> {
-    parser: Parser<'read, 'error>,
+pub struct EntriesIter<'parser, 'read, 'error> {
+    parser: &'parser mut Parser<'read, 'error>,
 }
 
-impl<'read, 'error> Iterator for EntriesIter<'read, 'error> {
+impl<'parser, 'read, 'error> Iterator for EntriesIter<'parser, 'read, 'error> {
     type Item = Entry;
 
     fn next(&mut self) -> Option<Entry> {
