@@ -58,6 +58,8 @@ pub enum ErrorKind {
     ExpectedEquals,
     /// We were expecting one of two characters, but didn't get either one.
     ExpectedEither(u8, u8),
+    /// We found two entries with the same name (up to case differences, which don't count).
+    RepeatedEntry,
     /// While reading a string, we found a right brace without a corresponding left brace.
     UnbalancedBraces,
     /// A `@preamble` command was missing its closing delimiter.
@@ -86,6 +88,7 @@ impl PartialEq for ErrorKind {
             (InvalidIdChar(a), InvalidIdChar(b)) => a == b,
             (ExpectedEither(a, b), ExpectedEither(a1, b1)) => a == a1 && b == b1,
             (ExpectedEquals, ExpectedEquals) => true,
+            (RepeatedEntry, RepeatedEntry) => true,
             (UnterminatedString(a), UnterminatedString(b)) => a == b,
             (UnterminatedPreamble(a), UnterminatedPreamble(b)) => a == b,
             _ => false,
@@ -238,6 +241,7 @@ impl Problem {
             EmptyId(kind) => err!("You're missing {}", kind),
             InvalidIdChar(kind) => err!("\"{}\" immediately follows {}", xchr(self.state.line[self.state.col_num]), kind),
             UnbalancedBraces => err!("Unbalanced braces"),
+            RepeatedEntry => err!("Repeated entry"),
             Io(ref e) => err!("I/O error {}", e),
         }
         Ok(())

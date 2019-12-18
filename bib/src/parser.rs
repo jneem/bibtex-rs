@@ -1,6 +1,6 @@
 use common::Input;
 use common::input::is_white;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::Entry;
 use crate::citation_list::{CitationList, CrossrefList};
@@ -48,6 +48,11 @@ pub struct Parser<'read, 'error> {
     // book_key in the example above). Those that are referenced more than `min_crossrefs` will
     // appear in the bibliography even if they were not otherwise included.
     min_crossrefs: usize,
+
+    // We need to keep track of which entries we've already seen (in order to detect missing and
+    // repeated entries). It may be better to fold this in with `CitationList` somehow, but for now
+    // here it is. All of these entries are stored in ASCII lower case.
+    seen_entries: HashSet<Vec<u8>>,
 }
 
 impl<'read, 'error> Parser<'read, 'error> {
@@ -63,6 +68,7 @@ impl<'read, 'error> Parser<'read, 'error> {
             citation_list_initialized: false,
             crossref_list: Default::default(),
             min_crossrefs: 0,
+            seen_entries: HashSet::new(),
         }
     }
 
@@ -372,6 +378,13 @@ impl<'read, 'error> Parser<'read, 'error> {
                 self.report.report(&Problem::from_warning(WarningKind::UnknownEntryType(key.clone()), &self.input));
             }
         }
+
+        let lc_key = key.to_ascii_lowercase();
+        if self.seen_entries.contains(&lc_key) {
+            self.report.report(&Problem::from_error_with_context(ErrorKind::RepeatedEntry, ErrorContext::Entry, &self.input));
+            return None;
+        }
+        self.seen_entries.insert(lc_key);
 
         let mut ret = Entry {
             kind,

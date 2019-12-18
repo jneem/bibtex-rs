@@ -16,8 +16,7 @@ list_entries_failure!(unbalanced_braces, "unbalanced_braces.bib");
 list_entries_failure!(error_cases, "error_cases.bib");
 list_entries_failure!(string_warnings, "string_warnings.bib");
 list_entries_failure!(field_warnings, "field_warnings.bib");
+list_entries_failure!(key_cases, "key_cases.bib");
 
 list_entries_failure!(with_citation_list, "with_citation_list.bib", vec![&b"key1"[..], b"key2", b"key3"]);
 
-// This currently fails, because we aren't detecting duplicate keys.
-//list_entries_failure!(key_cases, "key_cases.bib");
