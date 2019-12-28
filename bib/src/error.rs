@@ -328,8 +328,7 @@ pub struct InputState {
     pub line_num: usize,
     /// The column where the error occurred.
     pub col_num: usize,
-    /// The contents of the line where the error occurred. (TODO: document the weird part about
-    /// this)
+    /// The contents of the line where the error occurred.
     pub line: Vec<u8>,
 }
 

@@ -47,7 +47,7 @@ pub struct Parser<'read, 'error> {
     // While processing the bibtex file, we keep track of all crossreferenced entries (i.e.
     // book_key in the example above). Those that are referenced more than `min_crossrefs` will
     // appear in the bibliography even if they were not otherwise included.
-    min_crossrefs: usize,
+    min_crossrefs: u8,
 
     // We need to keep track of which entries we've already seen (in order to detect missing and
     // repeated entries). It may be better to fold this in with `CitationList` somehow, but for now
@@ -92,7 +92,7 @@ impl<'read, 'error> Parser<'read, 'error> {
     ///
     /// When iterating over entries, the parser will ignore all entries belonging to this list,
     /// unless they were crossreferenced at least `min_crossrefs` times by something in this list.
-    pub fn with_citation_list<I: AsRef<[u8]>, T: IntoIterator<Item=I>>(mut self, list: T, min_crossrefs: usize) -> Self {
+    pub fn with_citation_list<I: AsRef<[u8]>, T: IntoIterator<Item=I>>(mut self, list: T, min_crossrefs: u8) -> Self {
         self.citation_list.initialize_with(list.into_iter().map(|xs| xs.as_ref().to_vec()).collect::<Vec<_>>());
         self.citation_list_initialized = true;
         self.min_crossrefs = min_crossrefs;
@@ -339,12 +339,17 @@ impl<'read, 'error> Parser<'read, 'error> {
         }
 
         let field_name = self.scan_identifier(|c| c == b'=', IdentifierKind::FieldName)?;
-        let ignore_field = ignore_it || self.field_name_checker.as_mut().map(|f| f(&field_name)) == Some(false);
+        let ignore_field = ignore_it
+            || (field_name != b"crossref" && self.field_name_checker.as_mut().map(|f| f(&field_name)) == Some(false));
 
         self.skip_white_space()?;
         self.expect(b'=', ErrorKind::ExpectedEquals)?;
         self.skip_white_space()?;
         let field_value = self.parse_field_value(closing_delim, None, ignore_field)?;
+
+        if !ignore_it && field_name == b"crossref" {
+            self.crossref_list.add(&field_value);
+        }
 
         // BibTex silently overwrites duplicate fields; see WEB section 245.
         if !ignore_field {
@@ -395,7 +400,13 @@ impl<'read, 'error> Parser<'read, 'error> {
         if self.skip_white_space().or_bail(self, ErrorContext::Entry).is_none() {
             return Some(Item::Entry(ret));
         }
-        let ignore_it = !self.citation_list.contains(&ret.key);
+
+        // If an entry appears on the citation list, we include it. If it isn't on the citation
+        // list, but has appeared enough times as a cross-reference, we also include it.
+        let ignore_it =
+            !self.citation_list.contains(&ret.key)
+            && self.crossref_list.count(&ret.key) < self.min_crossrefs;
+
         while self.input.current() != closing_delim {
             if self.parse_entry_field(&mut ret, closing_delim, ignore_it)
                     .or_bail(self, ErrorContext::Entry)

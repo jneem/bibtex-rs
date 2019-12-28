@@ -33,6 +33,13 @@ impl CitationList {
         // conversion.
         self.all_marker.is_some() || self.key_indices.contains_key(&key.as_ref().to_ascii_lowercase())
     }
+
+    pub fn insert(&mut self, key: Vec<u8>) {
+        debug_assert!(!self.contains(&key));
+
+        self.key_indices.insert(key.clone(), self.key_indices.len());
+        self.keys.push(key);
+    }
 }
 
 /// `.bib` files can contain cross-references, so when parsing a `.bib` file we need to keep track
@@ -47,3 +54,21 @@ pub(crate) struct CrossrefList {
     pub crossref_counts: Vec<u8>,
 }
 
+impl CrossrefList {
+    pub fn add(&mut self, crossref: &[u8]) {
+        if let Some(&idx) = self.list.key_indices.get(crossref) {
+            self.crossref_counts[idx] = self.crossref_counts[idx].saturating_add(1);
+        } else {
+            self.list.insert(crossref.to_vec());
+            self.crossref_counts.push(1);
+        }
+    }
+
+    pub fn count(&self, crossref: &[u8]) -> u8 {
+        if let Some(&idx) = self.list.key_indices.get(crossref) {
+            self.crossref_counts[idx]
+        } else {
+            0
+        }
+    }
+}
