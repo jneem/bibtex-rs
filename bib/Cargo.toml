@@ -8,4 +8,4 @@ edition = "2018"
 common = { path = "../common/" }
 
 [dev-dependencies]
-tectonic_tester = { path = "../tectonic_tester/" }
+system_bibtex_tester = { path = "../system_bibtex_tester/" }

@@ -1,16 +1,12 @@
-ENTRY { field }{}{}
+ENTRY { field title author }{}{}
 
-FUNCTION {test}
+FUNCTION {write_key}
 { cite$ write$ newline$ }
 
-FUNCTION {print}
-{ "this is a test" warning$ }
-
 FUNCTION {article}
-{"de la Cierva y Codorn{\’\i}u, Juan"
-#1 "{ff - }{vv - }{ll}" format.name$ top$}
+{}
 
 READ
 
-ITERATE {test}
+ITERATE {write_key}
 

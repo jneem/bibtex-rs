@@ -2,8 +2,7 @@ use common::Input;
 use common::input::is_white;
 use std::collections::{HashMap, HashSet};
 
-use crate::Entry;
-use crate::citation_list::{CitationList, CrossrefList};
+use crate::{BStringLc, DatabaseBuilder, Entry};
 use crate::error::{ErrorContext, ErrorKind, IdentifierKind, Problem, ProblemReporter, WarningKind};
 
 trait ResultExt<T> {
@@ -22,32 +21,21 @@ impl<T> ResultExt<T> for Result<T, ErrorKind> {
     }
 }
 
+// TODO: should introduce a mode that reads everything into a datastructure and then does some
+// postprocessing:
+//  - substitute crossref fields
+//  - warn if missing an entry
+//  - anything else? WEB section 276 is the place to start looking.
 /// A parser for `.bib` files.
 pub struct Parser<'read, 'error> {
     input: Input<'read>,
 
     report: Box<dyn ProblemReporter + 'error>,
 
-    // BibTex does space compression on macros at substitution time. We do it at declaration time,
-    // so the values stored here have already had their spaces compressed.
-    macros: HashMap<Vec<u8>, Vec<u8>>,
+    db: DatabaseBuilder,
 
     entry_type_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
     field_name_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
-
-    citation_list: CitationList,
-    // Was the citation list explicitly initialized? If not, we default to allowing all citations.
-    citation_list_initialized: bool,
-    crossref_list: CrossrefList,
-
-    // Entries can contain a `crossref` field, like
-    // @article{article_key, title="Blah", crossref=book_key}
-    // @book{book_key, editor="Me"}
-    //
-    // While processing the bibtex file, we keep track of all crossreferenced entries (i.e.
-    // book_key in the example above). Those that are referenced more than `min_crossrefs` will
-    // appear in the bibliography even if they were not otherwise included.
-    min_crossrefs: u8,
 
     // We need to keep track of which entries we've already seen (in order to detect missing and
     // repeated entries). It may be better to fold this in with `CitationList` somehow, but for now
@@ -61,15 +49,34 @@ impl<'read, 'error> Parser<'read, 'error> {
         Parser {
             input: Input::from_reader(read),
             report: Box::new(report),
-            macros: HashMap::new(),
+            db: DatabaseBuilder::with_all_citations(),
             entry_type_checker: None,
             field_name_checker: None,
-            citation_list: Default::default(),
-            citation_list_initialized: false,
-            crossref_list: Default::default(),
-            min_crossrefs: 0,
             seen_entries: HashSet::new(),
         }
+    }
+
+    // The interaction between `Parser` and `DatabaseBuilder` is a little strange (which is why
+    // this interface is private to the crate). The point is that it's convenient for `Parser` to
+    // own the storage that it uses -- this makes the simple Parser API possible. On the other
+    // hand, sometimes we want the storage to outlive the parser (because we want to parse many bib
+    // files in succession, appending to the same storage). One way to have this would be to make
+    // the parser take a &mut DatabaseBuilder, but this would make the simple Parser API
+    // impossible. So instead we provide a way to move the DatabaseBuilder into (this function) and
+    // out of (the next function) a Parser.
+    pub(crate) fn with_db_builder<R: std::io::BufRead + 'read, E: ProblemReporter + 'error>(read: R, report: E, db: DatabaseBuilder) -> Parser<'read, 'error> {
+        Parser {
+            input: Input::from_reader(read),
+            report: Box::new(report),
+            db,
+            entry_type_checker: None,
+            field_name_checker: None,
+            seen_entries: HashSet::new(),
+        }
+    }
+
+    pub(crate) fn into_db_builder(self) -> DatabaseBuilder {
+        self.db
     }
 
     /// Provides a function for checking whether the entries are of a known type.
@@ -92,19 +99,16 @@ impl<'read, 'error> Parser<'read, 'error> {
     ///
     /// When iterating over entries, the parser will ignore all entries belonging to this list,
     /// unless they were crossreferenced at least `min_crossrefs` times by something in this list.
+    ///
+    /// TODO: should we even be exposing this in Parser? Maybe force them to use the
+    /// DatabaseBuilder interface instead.
     pub fn with_citation_list<I: AsRef<[u8]>, T: IntoIterator<Item=I>>(mut self, list: T, min_crossrefs: u8) -> Self {
-        self.citation_list.initialize_with(list.into_iter().map(|xs| xs.as_ref().to_vec()).collect::<Vec<_>>());
-        self.citation_list_initialized = true;
-        self.min_crossrefs = min_crossrefs;
+        self.db = DatabaseBuilder::from_citation_list(list, min_crossrefs);
         self
     }
 
     /// Returns an iterator over all the entries in this `.bib` file.
     pub fn entries<'parser>(&'parser mut self) -> EntriesIter<'parser, 'read, 'error> {
-        if !self.citation_list_initialized {
-            self.citation_list_initialized = true;
-            self.citation_list.initialize_with(vec![vec![b'*']]);
-        }
         EntriesIter {
             parser: self,
         }
@@ -233,7 +237,7 @@ impl<'read, 'error> Parser<'read, 'error> {
                     // substitute the empty string.
                     self.report.report(&Problem::from_warning(WarningKind::RecursiveString(id), &self.input));
                     Ok(Vec::new())
-                } else if let Some(val) = self.macros.get(&id) {
+                } else if let Some(val) = self.db.strings.get(&id) {
                     Ok(val.to_owned())
                 } else {
                     // The macro hasn't been defined yet, but we don't error out (because BibTex
@@ -311,7 +315,7 @@ impl<'read, 'error> Parser<'read, 'error> {
 
         // We don't need to check if the macro was already defined. BibTex just overwrites the
         // value silently.
-        self.macros.insert(key.clone(), val.clone());
+        self.db.strings.insert(key.clone(), val.clone());
 
         Ok(Item::String { _key: key, _val: val })
     }
@@ -347,8 +351,8 @@ impl<'read, 'error> Parser<'read, 'error> {
         self.skip_white_space()?;
         let field_value = self.parse_field_value(closing_delim, None, ignore_field)?;
 
-        if !ignore_it && field_name == b"crossref" {
-            self.crossref_list.add(&field_value);
+        if !ignore_it && !self.db.cite_list().has_all() && field_name == b"crossref" {
+            self.db.add_crossref(&field_value);
         }
 
         // BibTex silently overwrites duplicate fields; see WEB section 245.
@@ -384,12 +388,13 @@ impl<'read, 'error> Parser<'read, 'error> {
             }
         }
 
-        let lc_key = key.to_ascii_lowercase();
-        if self.seen_entries.contains(&lc_key) {
+        let lc_key = BStringLc::from_bytes(&key);
+        // FIXME: this seen_entries stuff isn't correct in the presence of multiple bib files.
+        if self.seen_entries.contains(&lc_key as &[u8]) {
             self.report.report(&Problem::from_error_with_context(ErrorKind::RepeatedEntry, ErrorContext::Entry, &self.input));
             return None;
         }
-        self.seen_entries.insert(lc_key);
+        self.seen_entries.insert(lc_key.to_vec());
 
         let mut ret = Entry {
             kind,
@@ -401,11 +406,7 @@ impl<'read, 'error> Parser<'read, 'error> {
             return Some(Item::Entry(ret));
         }
 
-        // If an entry appears on the citation list, we include it. If it isn't on the citation
-        // list, but has appeared enough times as a cross-reference, we also include it.
-        let ignore_it =
-            !self.citation_list.contains(&ret.key)
-            && self.crossref_list.count(&ret.key) < self.min_crossrefs;
+        let ignore_it = !self.db.contains_citation(&lc_key);
 
         while self.input.current() != closing_delim {
             if self.parse_entry_field(&mut ret, closing_delim, ignore_it)
@@ -414,6 +415,7 @@ impl<'read, 'error> Parser<'read, 'error> {
                 return if ignore_it {
                     None
                 } else {
+                    self.db.store_entry(&ret, &lc_key);
                     Some(Item::Entry(ret))
                 };
             }
@@ -425,6 +427,7 @@ impl<'read, 'error> Parser<'read, 'error> {
         if ignore_it {
             None
         } else {
+            self.db.store_entry(&ret, &lc_key);
             Some(Item::Entry(ret))
         }
     }
@@ -529,6 +532,27 @@ mod tests {
 
     fn parser(s: &'static [u8]) -> Parser<'static, 'static> {
         Parser::new(s, ())
+    }
+
+    // The presence of io::Error prevents us from automatically deriving this.
+    impl PartialEq for ErrorKind {
+        fn eq(&self, other: &ErrorKind) -> bool {
+            use ErrorKind::*;
+    
+            match (self, other) {
+                (BadCrossReference { child: ref c, parent: ref p }, BadCrossReference { child: ref d, parent: ref q }) => c == d && p == q,
+                (UnexpectedEOF, UnexpectedEOF) => true,
+                (UnbalancedBraces, UnbalancedBraces) => true,
+                (EmptyId(a), EmptyId(b)) => a == b,
+                (InvalidIdChar(a), InvalidIdChar(b)) => a == b,
+                (ExpectedEither(a, b), ExpectedEither(a1, b1)) => a == a1 && b == b1,
+                (ExpectedEquals, ExpectedEquals) => true,
+                (RepeatedEntry, RepeatedEntry) => true,
+                (UnterminatedString(a), UnterminatedString(b)) => a == b,
+                (UnterminatedPreamble(a), UnterminatedPreamble(b)) => a == b,
+                _ => false,
+            }
+        }
     }
 
     #[test]

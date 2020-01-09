@@ -6,6 +6,8 @@ use common::input::is_white;
 use std::io;
 use std::sync::Arc;
 
+use crate::BString;
+
 fn xchr(c: u8) -> char {
     match c {
         127 => ' ', // DEL
@@ -25,7 +27,7 @@ fn xchrs(cs: &[u8]) -> String {
 /// An `Error` is capable of producing BibTex-compatible error messages, with the
 /// [`Error::write_comwrite_compatible_errmsg`] function.
 // TODO: should this implement std::Error?
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Error {
     /// What kind of error is this?
     pub kind: ErrorKind,
@@ -47,6 +49,8 @@ pub struct Error {
 /// EOF).
 #[derive(Clone, Debug)]
 pub enum ErrorKind {
+    /// An entry tried to cross-reference a non-existent entry.
+    BadCrossReference { child: BString, parent: BString },
     /// We encountered the end of the file before we expected to.
     UnexpectedEOF,
     /// We were expecting to see an identifier, but instead we found a character that isn't allowed
@@ -76,26 +80,6 @@ impl From<io::Error> for ErrorKind {
     }
 }
 
-// The presence of io::Error prevents us from automatically deriving this.
-impl PartialEq for ErrorKind {
-    fn eq(&self, other: &ErrorKind) -> bool {
-        use ErrorKind::*;
-
-        match (self, other) {
-            (UnexpectedEOF, UnexpectedEOF) => true,
-            (UnbalancedBraces, UnbalancedBraces) => true,
-            (EmptyId(a), EmptyId(b)) => a == b,
-            (InvalidIdChar(a), InvalidIdChar(b)) => a == b,
-            (ExpectedEither(a, b), ExpectedEither(a1, b1)) => a == a1 && b == b1,
-            (ExpectedEquals, ExpectedEquals) => true,
-            (RepeatedEntry, RepeatedEntry) => true,
-            (UnterminatedString(a), UnterminatedString(b)) => a == b,
-            (UnterminatedPreamble(a), UnterminatedPreamble(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
 /// Some of the error kinds in [`ErrorKind`] can happen either in different contexts within the
 /// `.bib` file. We keep track of the context, because it's sometimes needed for the error message.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -112,6 +96,11 @@ pub enum ErrorContext {
 /// rest of the input until a blank line is encountered.
 #[derive(Clone, Debug)]
 pub enum WarningKind {
+    /// We were expecting to find an entry that wasn't there.
+    MissingEntry(BString),
+    /// We encountered a nested cross-reference: an entry that was referenced in a `crossref` field
+    /// has a `crossref` field of its own.
+    NestedCrossRef { child: BString, parent: BString },
     /// We tried to expand a string during its own definition.
     RecursiveString(Vec<u8>),
     /// We tried to expand a string that wasn't defined.
@@ -150,7 +139,10 @@ pub struct Problem {
     /// Note that storing a clone of the input state here is not the most efficient possible thing
     /// (because much of the time we could probably get away without cloning it). But it's
     /// convenient, and optimizing the error case probably isn't so important.
-    pub state: InputState,
+    ///
+    /// Note that not every warning comes from a specific part of the input (e.g. MissingEntry). It
+    /// would be nice to express this is a more typesafe way.
+    pub state: Option<InputState>,
 }
 
 impl Problem {
@@ -158,7 +150,15 @@ impl Problem {
         Problem {
             kind: ProblemKind::Warning(kind),
             context: None,
-            state: InputState::new(input),
+            state: Some(InputState::new(input)),
+        }
+    }
+
+    pub(crate) fn from_warning_no_input(kind: WarningKind) -> Problem {
+        Problem {
+            kind: ProblemKind::Warning(kind),
+            context: None,
+            state: None,
         }
     }
 
@@ -166,7 +166,15 @@ impl Problem {
         Problem {
             kind: ProblemKind::Error(kind),
             context: None,
-            state: InputState::new(input),
+            state: Some(InputState::new(input)),
+        }
+    }
+
+    pub(crate) fn from_error_no_input(kind: ErrorKind) -> Problem {
+        Problem {
+            kind: ProblemKind::Error(kind),
+            context: None,
+            state: None,
         }
     }
 
@@ -174,7 +182,7 @@ impl Problem {
         Problem {
             kind: ProblemKind::Error(kind),
             context: Some(context),
-            state: InputState::new(input),
+            state: Some(InputState::new(input)),
         }
     }
 
@@ -185,9 +193,10 @@ impl Problem {
             buf.iter().map(|&c| if is_white(c) { b' ' } else { c }).collect()
         }
 
-        let before: Vec<u8> = map_space(&self.state.line[..self.state.col_num]);
+        let state = self.state.as_ref().unwrap();
+        let before: Vec<u8> = map_space(&state.line[..state.col_num]);
         let spaces = vec![b' '; before.len()];
-        let after: Vec<u8> = map_space(&self.state.line[self.state.col_num..]);
+        let after: Vec<u8> = map_space(&state.line[state.col_num..]);
         write.write_all(b" : ")?;
         write.write_all(&before)?;
         write.write_all(b"\n : ")?;
@@ -204,7 +213,8 @@ impl Problem {
     // This corresponds to WEB section 221 in BibTex. It prints the line number, the contents of
     // the bad line, and the text "skipping whatever remains".
     fn common_err_msg(&self, write: &mut dyn io::Write, filename: &str) -> io::Result<()> {
-        writeln!(write, "---line {} of file {}", self.state.line_num, filename)?;
+        let state = self.state.as_ref().unwrap();
+        writeln!(write, "---line {} of file {}", state.line_num, filename)?;
         self.print_input_line(write)?;
         let context = match self.context {
             Some(ErrorContext::Command) => "command",
@@ -216,7 +226,7 @@ impl Problem {
     }
 
     fn common_warn_msg(&self, write: &mut dyn io::Write, filename: &str) -> io::Result<()> {
-        writeln!(write, "--line {} of file {}", self.state.line_num, filename)?;
+        writeln!(write, "--line {} of file {}", self.state.as_ref().unwrap().line_num, filename)?;
         Ok(())
     }
 
@@ -233,15 +243,21 @@ impl Problem {
         };
 
         match *kind {
+            BadCrossReference { ref child, ref parent} =>
+                writeln!(
+                    write,
+                    "A bad cross reference---entry \"{}\"\nrefers to entry \"{}\", which doesn't exist",
+                    xchrs(child),
+                    xchrs(parent))?,
             UnexpectedEOF => err!("Illegal end of database file"),
             ExpectedEquals => err!("I was expecting an \"=\""),
             ExpectedEither(a, b) => err!("I was expecting a `{}' or a `{}'", xchr(a), xchr(b)),
             UnterminatedPreamble(a) => err!("Missing \"{}\" in preamble command", xchr(a)),
             UnterminatedString(a) => err!("Missing \"{}\" in string command", xchr(a)),
             EmptyId(kind) => err!("You're missing {}", kind),
-            InvalidIdChar(kind) => err!("\"{}\" immediately follows {}", xchr(self.state.line[self.state.col_num]), kind),
-            UnbalancedBraces => err!("Unbalanced braces"),
+            InvalidIdChar(kind) => err!("\"{}\" immediately follows {}", xchr(self.state.as_ref().unwrap().line[self.state.as_ref().unwrap().col_num]), kind),
             RepeatedEntry => err!("Repeated entry"),
+            UnbalancedBraces => err!("Unbalanced braces"),
             Io(ref e) => err!("I/O error {}", e),
         }
         Ok(())
@@ -260,6 +276,13 @@ impl Problem {
         };
 
         match kind {
+            MissingEntry(ref name) => writeln!(write, "Warning--I didn't find a database entry for \"{}\"", xchrs(name))?,
+            NestedCrossRef { ref child, ref parent } =>
+                writeln!(
+                    write,
+                    "Warning--you've nested cross references--entry \"{}\"\nrefers to entry \"{}\", which also refers to something",
+                    xchrs(child),
+                    xchrs(parent))?,
             RecursiveString(ref name) => warn!("Warning--string name \"{}\" is used in its own definition", xchrs(name)),
             UndefinedString(ref name) => warn!("Warning--string name \"{}\" is undefined", xchrs(name)),
             UnknownEntryType(ref key) => warn!("Warning--entry type for \"{}\" isn't style-file defined", xchrs(key)),
