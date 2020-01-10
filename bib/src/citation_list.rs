@@ -37,8 +37,8 @@ impl CitationList {
     pub(crate) fn initialize_with(&mut self, keys: Vec<BString>) {
         debug_assert!(self.keys.is_empty());
 
-        let idx = self.keys.len();
         for k in keys {
+            let idx = self.keys.len();
             if k == b"*" {
                 if self.all_marker.is_none() {
                     self.all_marker = Some(idx);

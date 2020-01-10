@@ -34,9 +34,6 @@ pub struct Parser<'read, 'error> {
 
     db: DatabaseBuilder,
 
-    entry_type_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
-    field_name_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
-
     // We need to keep track of which entries we've already seen (in order to detect missing and
     // repeated entries). It may be better to fold this in with `CitationList` somehow, but for now
     // here it is. All of these entries are stored in ASCII lower case.
@@ -50,8 +47,6 @@ impl<'read, 'error> Parser<'read, 'error> {
             input: Input::from_reader(read),
             report: Box::new(report),
             db: DatabaseBuilder::with_all_citations(),
-            entry_type_checker: None,
-            field_name_checker: None,
             seen_entries: HashSet::new(),
         }
     }
@@ -69,8 +64,6 @@ impl<'read, 'error> Parser<'read, 'error> {
             input: Input::from_reader(read),
             report: Box::new(report),
             db,
-            entry_type_checker: None,
-            field_name_checker: None,
             seen_entries: HashSet::new(),
         }
     }
@@ -83,7 +76,7 @@ impl<'read, 'error> Parser<'read, 'error> {
     ///
     /// Whenever the provided function returns false, a warning will be issued.
     pub fn with_entry_type_checker<F: FnMut(&[u8]) -> bool + 'static>(mut self, f: F) -> Self {
-        self.entry_type_checker = Some(Box::new(f));
+        self.db = self.db.with_entry_type_checker(f);
         self
     }
 
@@ -91,7 +84,7 @@ impl<'read, 'error> Parser<'read, 'error> {
     ///
     /// Whenever the provided function returns false, a warning will be issued.
     pub fn with_field_name_checker<F: FnMut(&[u8]) -> bool + 'static>(mut self, f: F) -> Self {
-        self.field_name_checker = Some(Box::new(f));
+        self.db = self.db.with_field_name_checker(f);
         self
     }
 
@@ -344,7 +337,7 @@ impl<'read, 'error> Parser<'read, 'error> {
 
         let field_name = self.scan_identifier(|c| c == b'=', IdentifierKind::FieldName)?;
         let ignore_field = ignore_it
-            || (field_name != b"crossref" && self.field_name_checker.as_mut().map(|f| f(&field_name)) == Some(false));
+            || (field_name != b"crossref" && self.db.field_name_checker.as_mut().map(|f| f(&field_name)) == Some(false));
 
         self.skip_white_space()?;
         self.expect(b'=', ErrorKind::ExpectedEquals)?;
@@ -382,7 +375,7 @@ impl<'read, 'error> Parser<'read, 'error> {
             self.input.scan_while(|b| !is_white(b) && b != b',' && b != b'}')
         };
 
-        if let Some(ref mut check) = self.entry_type_checker {
+        if let Some(ref mut check) = self.db.entry_type_checker {
             if !check(&kind) {
                 self.report.report(&Problem::from_warning(WarningKind::UnknownEntryType(key.clone()), &self.input));
             }

@@ -2,7 +2,7 @@ use bstr::{BStr, BString, ByteSlice};
 use std::collections::HashSet;
 use tempfile::{TempDir, tempdir};
 
-use bib::Parser;
+use bib::DatabaseBuilder;
 use bib::error::ProblemKind;
 
 pub struct BibtexRunner {
@@ -88,22 +88,37 @@ impl BibtexRunner {
         known_fields.insert(b"title");
         known_fields.insert(b"author");
 
-        let mut parser = Parser::new(&self.bib_data[..], &mut errors)
+        let db = if let Some(ref citation_list) = self.citation_list {
+            DatabaseBuilder::from_citation_list(citation_list, 2)
+        } else {
+            DatabaseBuilder::with_all_citations()
+        };
+        let mut db = db
             .with_entry_type_checker(|s| s == b"article")
             .with_field_name_checker(move |s| known_fields.get(s).is_some());
 
-        if let Some(ref citation_list) = self.citation_list {
-            parser = parser.with_citation_list(citation_list, 2);
-        }
+        db.merge_bib_file(&self.bib_data[..], &mut errors);
 
-        let mut keys = Vec::new();
-        for entry in parser.entries() {
+        let mut lines = Vec::new();
+        for entry in db.into_entries(&mut errors) {
             if !entry.key.is_empty() { 
                 // because of the FIXME above, we have to filter out empty keys here too.
-                keys.push(String::from_utf8(entry.key).unwrap())
+                lines.push(BString::from(entry.key.clone()))
             }
+
+            let mut add_field = |field_name: &[u8]| {
+                if let Some(field) = entry.fields.get(field_name) {
+                    let mut line = field_name.to_vec();
+                    line.extend_from_slice(b": ");
+                    line.extend_from_slice(field);
+                    lines.push(BString::from(line));
+                }
+            };
+            add_field(b"field");
+            add_field(b"title");
+            add_field(b"author");
         }
-        drop(parser); // Because it's borrowing errors.
+
         for err in errors {
             // FIXME: We only check for equality of the error messages, not the warning messages.
             // That's because some of the warning messages that we want to test for don't show up
@@ -117,7 +132,7 @@ impl BibtexRunner {
             }
         }
 
-        assert_eq!(keys, reference_output.bbl_lines);
+        assert_eq!(lines, reference_output.bbl_lines);
         assert_eq!(BString::from(error_buf.to_ascii_lowercase()), BString::from(reference_output.stdout.to_ascii_lowercase()));
         !found_error
     }

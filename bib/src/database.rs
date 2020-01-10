@@ -9,7 +9,6 @@ use crate::error::{ErrorKind, Problem, ProblemReporter, WarningKind};
 /// TODO: redo the docs
 /// TODO: some of these fields (i.e. entries and extra_entries) are only used for parsers that are
 /// storing their own data. Maybe split out a separate struct?
-#[derive(Debug)]
 pub struct DatabaseBuilder {
     /// This field will not be modified in the course of parsing a database file. It lists the
     /// citations as contained in the .aux file (possibly including an "all citations marker",
@@ -38,6 +37,14 @@ pub struct DatabaseBuilder {
     /// A map going from (lower-cased) keys to indices in `entries`.
     entry_index: HashMap<BStringLc, usize>,
 
+    /// This is a callback providing some context that normally comes from `.bst` file: what are
+    /// the admissible entry names? (Like article, book, etc.)
+    pub(crate) entry_type_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
+
+    /// This is a callback providing some context that normally comes from `.bst` file: what are
+    /// the admissible field names? (Like author, title, etc.)
+    pub(crate) field_name_checker: Option<Box<dyn FnMut(&[u8]) -> bool>>,
+
     /// The string substitutions defined so far. Note that bibtex compresses adjacent whitespace
     /// whenever it does a string substitution. We don't do this, so any spaces should already be
     /// compressed here.
@@ -52,6 +59,8 @@ impl DatabaseBuilder {
             extra_list: Default::default(),
             entries: Vec::new(),
             entry_index: HashMap::new(),
+            entry_type_checker: None,
+            field_name_checker: None,
             strings: HashMap::new(),
         }
     }
@@ -74,7 +83,23 @@ impl DatabaseBuilder {
         }
     }
 
-    pub fn cite_list(&self) -> &CitationList {
+    /// Provides a function for checking whether the entries are of a known type.
+    ///
+    /// Whenever the provided function returns false, a warning will be issued.
+    pub fn with_entry_type_checker<F: FnMut(&[u8]) -> bool + 'static>(mut self, f: F) -> Self {
+        self.entry_type_checker = Some(Box::new(f));
+        self
+    }
+
+    /// Provides a function for checking whether the field names are known.
+    ///
+    /// Whenever the provided function returns false, a warning will be issued.
+    pub fn with_field_name_checker<F: FnMut(&[u8]) -> bool + 'static>(mut self, f: F) -> Self {
+        self.field_name_checker = Some(Box::new(f));
+        self
+    }
+
+    pub(crate) fn cite_list(&self) -> &CitationList {
         &self.citation_list
     }
 
@@ -97,7 +122,7 @@ impl DatabaseBuilder {
     }
 
     /// Checks whether we have already stored the entry for a given key.
-    pub fn contains_entry(&self, key: &BStringLc) -> bool {
+    pub(crate) fn contains_entry(&self, key: &BStringLc) -> bool {
         self.entry_index.contains_key(key)
     }
 
@@ -106,17 +131,17 @@ impl DatabaseBuilder {
     /// There are two ways that a key could be an interesting citation: it could be on the original
     /// `cite_list` of interesting citations (this includes the case that `cite_list` contains
     /// `*`), or it could be some key that was crossreferenced.
-    pub fn contains_citation(&self, key: &BStringLc) -> bool {
+    pub(crate) fn contains_citation(&self, key: &BStringLc) -> bool {
         self.cite_list().contains(key) || self.extra_list.list.contains(key)
     }
 
-    pub fn add_crossref(&mut self, key: &[u8]) {
+    pub(crate) fn add_crossref(&mut self, key: &[u8]) {
         debug_assert!(!self.cite_list().has_all());
 
         self.extra_list.add(key);
     }
 
-    pub fn store_entry(&mut self, entry: &Entry, lc_key: &BStringLc) {
+    pub(crate) fn store_entry(&mut self, entry: &Entry, lc_key: &BStringLc) {
         debug_assert!(!self.entry_index.contains_key(lc_key));
 
         self.entry_index.insert(lc_key.clone(), self.entries.len());
@@ -128,8 +153,6 @@ impl DatabaseBuilder {
             debug_assert!(self.contains_citation(lc_key));
         }
     }
-
-    // TODO: provide with_entry_type_checker and with_field_name_checker
 
     // Rearranges the entries so that the appear in the same order as they do in bibtex: first, we
     // include the entries in the order they appear `citation_list`. This continues until either we
@@ -143,11 +166,12 @@ impl DatabaseBuilder {
         let mut taken = vec![false; self.entries.len()];
         let end_idx = self.cite_list().all_marker.unwrap_or(self.cite_list().len());
         for key in &self.citation_list.keys[..end_idx] {
-            let entry_idx = self.entry_index[&BStringLc::from_bytes(key)];
-            let mut entry = Entry::empty();
-            std::mem::swap(&mut entry, &mut self.entries[entry_idx]);
-            rearranged.push(entry);
-            taken[entry_idx] = true;
+            if let Some(&entry_idx) = self.entry_index.get(&BStringLc::from_bytes(key)) {
+                let mut entry = Entry::empty();
+                std::mem::swap(&mut entry, &mut self.entries[entry_idx]);
+                rearranged.push(entry);
+                taken[entry_idx] = true;
+            }
         }
 
         for (entry, gone) in self.entries.drain(..).zip(taken.into_iter()) {
