@@ -3,6 +3,7 @@ use system_bibtex_tester::{list_entries_success, list_entries_failure};
 list_entries_success!(basic, "basic.bib");
 list_entries_success!(field_warnings, "field_warnings.bib");
 list_entries_success!(string_warnings, "string_warnings.bib");
+list_entries_success!(crossref_nested, "crossref_nested.bib");
 
 list_entries_failure!(missing_entry_type, "missing_entry_type.bib");
 list_entries_failure!(missing_field_name, "missing_field_name.bib");
@@ -20,6 +21,8 @@ list_entries_failure!(key_cases, "key_cases.bib");
 
 list_entries_failure!(with_citation_list, "with_citation_list.bib", vec![&b"key1"[..], b"key2", b"key3"]);
 
+list_entries_success!(crossref_fields, "crossref_fields.bib", vec![&b"key1"[..], b"key2", b"key3"]);
 list_entries_success!(crossref_filtering, "crossref_filtering.bib", vec![&b"key1"[..], b"key2", b"key3"]);
+list_entries_failure!(crossref_missing, "crossref_missing.bib", vec![&b"key1"[..], b"key2"]);
 list_entries_success!(entry_order, "entry_order.bib", vec![&b"key1"[..], b"key2", b"*", b"key3"]);
 

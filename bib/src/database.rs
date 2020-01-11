@@ -148,7 +148,7 @@ impl DatabaseBuilder {
         self.entries.push(entry.clone());
 
         if self.cite_list().has_all() {
-            self.extra_list.list.insert(lc_key.to_vec());
+            self.extra_list.add(lc_key);
         } else {
             debug_assert!(self.contains_citation(lc_key));
         }
@@ -227,7 +227,7 @@ impl DatabaseBuilder {
                 // the database. In addition, it either needs to have been cited enough times, or
                 // it needs to have been something that was in our original cite list anyway.
                 let parent_found = self.entry_index.contains_key(&parent_lc);
-                let enough_cites = self.extra_list.count(parent_key) >= self.min_crossrefs;
+                let enough_cites = self.citation_list.has_all() || self.extra_list.count(parent_key) >= self.min_crossrefs;
                 let on_cite_list = self.citation_list.contains(&parent_lc);
 
                 if !parent_found {
@@ -248,7 +248,7 @@ impl DatabaseBuilder {
     }
 
     fn complain_about_missing_entries(&self, report: &mut impl ProblemReporter) {
-        for key in &self.citation_list.keys {
+        for key in self.citation_list.keys.iter().chain(self.extra_list.list.keys.iter()) {
             if !self.contains_entry(&BStringLc::from_bytes(key)) {
                 report.report(&Problem::from_warning_no_input(WarningKind::MissingEntry(key.clone())));
             }

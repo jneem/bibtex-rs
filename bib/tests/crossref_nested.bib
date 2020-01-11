@@ -1,0 +1,30 @@
+Nested crossreferences aren't really allowed (so they create warnings),
+and their behavior depends on the order that the entries appear.
+
+@article{grandchild,
+    crossref="child",
+}
+
+@article{child,
+    title="Child title",
+    crossref="parent",
+}
+
+@article{parent,
+    author = "Parent author",
+}
+
+@article{parent2,
+    author = "Parent author",
+}
+
+@article{child2,
+    title="Child title",
+    crossref="parent2",
+}
+
+@article{grandchild2,
+    crossref="child2",
+}
+
+
