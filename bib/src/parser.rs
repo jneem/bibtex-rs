@@ -387,6 +387,7 @@ impl<'read, 'error> Parser<'read, 'error> {
         };
 
         if self.skip_white_space().or_bail(self, ErrorContext::Entry).is_none() {
+            self.db.store_entry(&ret, &lc_key);
             return Some(Item::Entry(ret));
         }
 
