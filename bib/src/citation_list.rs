@@ -55,10 +55,6 @@ impl CitationList {
         self.all_marker.is_some() || self.key_indices.contains_key(key as &[u8])
     }
 
-    pub fn get_idx(&self, key: &BStringLc) -> Option<usize> {
-        self.key_indices.get(key as &[u8]).cloned()
-    }
-
     /// Does this citation list include the `*' citation?
     pub fn has_all(&self) -> bool {
         self.all_marker.is_some()

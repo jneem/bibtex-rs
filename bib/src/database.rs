@@ -4,11 +4,45 @@ use crate::{BString, BStringLc, Entry, Parser};
 use crate::citation_list::{CitationList, CrossrefList};
 use crate::error::{ErrorKind, Problem, ProblemReporter, WarningKind};
 
-/// A Database is an ordered collection of [`Entry`]'s.
+/// A `DatabaseBuilder` creates a collection of [`Entry`]s by reading one or more `bib` files.
+/// Compared to the simple `bib`-reading interface provided by [`Parser`], this one is more
+/// complete and correct, because
 ///
-/// TODO: redo the docs
-/// TODO: some of these fields (i.e. entries and extra_entries) are only used for parsers that are
-/// storing their own data. Maybe split out a separate struct?
+/// - it supports merging multiple `bib` files,
+/// - it resolves cross-references, and
+/// - it correctly reports warnings for missing entries.
+///
+/// ```
+/// use bib::DatabaseBuilder;
+/// let bib_data1 = r#"
+/// @book{Melville:51,
+///     title = "Moby Dick",
+///     author = "Herman Melville",
+/// }
+///
+/// @article{Shannon:48,
+///     title = "A Mathematical Theory of Communication",
+///     author = "Shannon, C. E.",
+///     crossref = "BSTJ",
+/// }"#;
+/// let bib_data2 = r#"
+/// @article{BSTJ,
+///     journal = "Bell System Technical Journal"
+/// }"#;
+///
+/// // One of two constructors. The other one, `DatabaseBuilder::from_citation_list`, allows for
+/// // filtering out uninteresting citations.
+/// let mut db = DatabaseBuilder::with_all_citations();
+///
+/// db.merge_bib_file(bib_data1.as_bytes(), ());
+/// db.merge_bib_file(bib_data2.as_bytes(), ());
+/// let entries = db.into_entries(());
+///
+/// assert_eq!(&entries[0].fields[&b"author"[..]], b"Herman Melville");
+/// assert_eq!(&entries[1].fields[&b"author"[..]], b"Shannon, C. E.");
+/// // The "journal" field gets merged in from BSTJ.
+/// assert_eq!(&entries[1].fields[&b"journal"[..]], b"Bell System Technical Journal");
+/// ```
 pub struct DatabaseBuilder {
     /// This field will not be modified in the course of parsing a database file. It lists the
     /// citations as contained in the .aux file (possibly including an "all citations marker",
@@ -65,6 +99,55 @@ impl DatabaseBuilder {
         }
     }
 
+    /// Creates a `DatabaseBuilder` from a list of citations. When merging in `bib` files with
+    /// [`DatabaseBuilder::merge_bib_file`], it will filter out uninteresting entries. Note that
+    /// "uninteresting" is a bit more complicated than "not on the list", for two reasons:
+    ///
+    ///  - The list of citations is allowed to include the special citation `"*"`, in which case
+    ///    nothing will be filtered out.
+    ///  - If entries corresponding to citations that are on the list crossreference other
+    ///    entries, then those other entries will be included as long as they are crossreferenced
+    ///    at least `min_crossrefs` times.
+    ///
+    /// In addition to filtering out uninteresting citations, the citation list also affects the
+    /// order in which the citations appear (in the return value of
+    /// [`DatabaseBuilder::into_entries`]). There are two cases, depending on whether the special
+    /// citation `"*"` is present:
+    ///
+    ///  - If `"*"` is on the citation list, then all entries before the `"*"` come first, in the
+    ///    same order that they appear on the citation list. After that come all the other entries,
+    ///    in the order that we encountered them in the `bib` files.
+    ///  - If `"*"` is not on the citation list, then the entries on the citation list come first
+    ///    (in the order that they appear on the citation list). After that come all the entries
+    ///    that are included because they were crossreferenced, in the order that we encountered
+    ///    them in the `bib` files.
+    ///
+    /// ```
+    /// use bib::DatabaseBuilder;
+    ///
+    ///
+    /// let mut database = DatabaseBuilder::from_citation_list(&[&b"key1"[..], b"key2", b"*"], 2);
+    /// let bib_data = r#"
+    /// @article{other1, }
+    /// @article{key2, }
+    /// @article{key1, }
+    /// @article{other2, }
+    /// "#;
+    /// database.merge_bib_file(bib_data.as_bytes(), ());
+    ///
+    /// // Because of the citation list we used above, key1 and key2 will come first, followed by
+    /// // the other entries in order of appearance.
+    /// let entries = database.into_entries(());
+    /// assert_eq!(&entries[0].key, b"key1");
+    /// assert_eq!(&entries[1].key, b"key2");
+    /// assert_eq!(&entries[2].key, b"other1");
+    /// assert_eq!(&entries[3].key, b"other2");
+    /// ```
+    ///
+    /// The behavior of this function is designed to make it easy to replicate bibtex's behavior,
+    /// which is achieved by taking all of the `\citation{..}` commands in the `.aux` file and
+    /// passing them to this constructor in the same order that they appeared in that file.
+    /// (Also, bibtex defaults to `2` for `min_crossrefs`.)
     pub fn from_citation_list<I: AsRef<[u8]>, T: IntoIterator<Item=I>>(list: T, min_crossrefs: u8) -> Self {
         let list: Vec<_> = list.into_iter().map(|xs| xs.as_ref().to_vec()).collect();
         let citation_list = CitationList::new(list);
@@ -76,6 +159,8 @@ impl DatabaseBuilder {
         }
     }
 
+    /// Creates a `DatabaseBuilder` that doesn't filter out any entries. This is equivalent to
+    /// `DatabaseBuilder::from_citation_list(&[&b"*"[..]])`.
     pub fn with_all_citations() -> Self {
         DatabaseBuilder {
             citation_list: CitationList::with_all_citations(),
@@ -83,18 +168,22 @@ impl DatabaseBuilder {
         }
     }
 
-    /// Provides a function for checking whether the entries are of a known type.
+    /// Registers a function for checking whether the entries are of a known type.
     ///
-    /// Whenever the provided function returns false, a warning will be issued.
-    pub fn with_entry_type_checker<F: FnMut(&[u8]) -> bool + 'static>(mut self, f: F) -> Self {
+    /// The provided function `f` will be called on every entry type encountered in the `bib` file
+    /// (common entry types include `"article"`, `"book"`, etc.), and if `f` returns false then the
+    /// entry will be skipped and a warning will be issued.
+    pub fn with_entry_type_checker<F: FnMut(&[u8]) -> bool + 'static>(&mut self, f: F) -> &mut Self {
         self.entry_type_checker = Some(Box::new(f));
         self
     }
 
-    /// Provides a function for checking whether the field names are known.
+    /// Registers a function for checking whether the field names are known.
     ///
-    /// Whenever the provided function returns false, a warning will be issued.
-    pub fn with_field_name_checker<F: FnMut(&[u8]) -> bool + 'static>(mut self, f: F) -> Self {
+    /// The provided function `f` will be called on every entry field name encountered in the `bib`
+    /// file (common field names include `"author"`, `"title"`, etc.), and if `f` returns false
+    /// then the field will be skipped.
+    pub fn with_field_name_checker<F: FnMut(&[u8]) -> bool + 'static>(&mut self, f: F) -> &mut Self {
         self.field_name_checker = Some(Box::new(f));
         self
     }
@@ -103,11 +192,19 @@ impl DatabaseBuilder {
         &self.citation_list
     }
 
+    /// Registers a set of string replacements, like in the bibtex `@string` command.
     pub fn with_initial_strings<T: IntoIterator<Item=(BString, BString)>>(&mut self, strings: T) -> &mut Self {
         self.strings = strings.into_iter().collect();
         self
     }
 
+    /// Merges a `bib` file into this database.
+    ///
+    /// Any interesting entries from the `bib` file will be added to the database, and any
+    /// `@string` definitions will be remembered.
+    ///
+    /// `report` is used for reporting any errors or warnings encountered while reading the `bib`
+    /// file.
     pub fn merge_bib_file<R, E>(&mut self, read: R, report: E)
     where
         R: std::io::BufRead,

@@ -88,13 +88,12 @@ impl BibtexRunner {
         known_fields.insert(b"title");
         known_fields.insert(b"author");
 
-        let db = if let Some(ref citation_list) = self.citation_list {
+        let mut db = if let Some(ref citation_list) = self.citation_list {
             DatabaseBuilder::from_citation_list(citation_list, 2)
         } else {
             DatabaseBuilder::with_all_citations()
         };
-        let mut db = db
-            .with_entry_type_checker(|s| s == b"article")
+        db.with_entry_type_checker(|s| s == b"article")
             .with_field_name_checker(move |s| known_fields.get(s).is_some());
 
         db.merge_bib_file(&self.bib_data[..], &mut errors);

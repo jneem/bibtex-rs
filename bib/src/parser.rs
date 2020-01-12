@@ -1,6 +1,6 @@
 use common::Input;
 use common::input::is_white;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::{BStringLc, DatabaseBuilder, Entry};
 use crate::error::{ErrorContext, ErrorKind, IdentifierKind, Problem, ProblemReporter, WarningKind};
@@ -33,11 +33,6 @@ pub struct Parser<'read, 'error> {
     report: Box<dyn ProblemReporter + 'error>,
 
     db: DatabaseBuilder,
-
-    // We need to keep track of which entries we've already seen (in order to detect missing and
-    // repeated entries). It may be better to fold this in with `CitationList` somehow, but for now
-    // here it is. All of these entries are stored in ASCII lower case.
-    seen_entries: HashSet<Vec<u8>>,
 }
 
 impl<'read, 'error> Parser<'read, 'error> {
@@ -47,7 +42,6 @@ impl<'read, 'error> Parser<'read, 'error> {
             input: Input::from_reader(read),
             report: Box::new(report),
             db: DatabaseBuilder::with_all_citations(),
-            seen_entries: HashSet::new(),
         }
     }
 
@@ -64,7 +58,6 @@ impl<'read, 'error> Parser<'read, 'error> {
             input: Input::from_reader(read),
             report: Box::new(report),
             db,
-            seen_entries: HashSet::new(),
         }
     }
 
@@ -76,7 +69,7 @@ impl<'read, 'error> Parser<'read, 'error> {
     ///
     /// Whenever the provided function returns false, a warning will be issued.
     pub fn with_entry_type_checker<F: FnMut(&[u8]) -> bool + 'static>(mut self, f: F) -> Self {
-        self.db = self.db.with_entry_type_checker(f);
+        self.db.with_entry_type_checker(f);
         self
     }
 
@@ -84,7 +77,7 @@ impl<'read, 'error> Parser<'read, 'error> {
     ///
     /// Whenever the provided function returns false, a warning will be issued.
     pub fn with_field_name_checker<F: FnMut(&[u8]) -> bool + 'static>(mut self, f: F) -> Self {
-        self.db = self.db.with_field_name_checker(f);
+        self.db.with_field_name_checker(f);
         self
     }
 
@@ -382,12 +375,10 @@ impl<'read, 'error> Parser<'read, 'error> {
         }
 
         let lc_key = BStringLc::from_bytes(&key);
-        // FIXME: this seen_entries stuff isn't correct in the presence of multiple bib files.
-        if self.seen_entries.contains(&lc_key as &[u8]) {
+        if self.db.contains_entry(&lc_key) {
             self.report.report(&Problem::from_error_with_context(ErrorKind::RepeatedEntry, ErrorContext::Entry, &self.input));
             return None;
         }
-        self.seen_entries.insert(lc_key.to_vec());
 
         let mut ret = Entry {
             kind,

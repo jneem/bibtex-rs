@@ -1,4 +1,4 @@
-//#![deny(missing_docs)]
+#![deny(missing_docs)]
 
 //! This is a crate for parsing BibTex's `.bib` files. It aims to support behavior that is
 //! identical to that of BibTex.
@@ -80,7 +80,7 @@
 
 use std::collections::HashMap;
 
-pub mod citation_list;
+mod citation_list;
 mod database;
 pub mod error;
 mod parser;
@@ -121,21 +121,28 @@ impl Entry {
     }
 }
 
+/// A string of bytes.
 pub type BString = Vec<u8>;
 
-/// A string that's guaranteed to be in ASCII lowercase.
+/// A byte string that's guaranteed to be in ASCII lowercase.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BStringLc(BString);
 
 impl BStringLc {
+    /// Creates a new, empty byte string.
     pub fn new() -> BStringLc {
         BStringLc(Vec::new())
     }
 
+    /// Converts from (a possibly non-lowercased) byte string to a lowercased byte string.
     pub fn from_bytes<I: AsRef<[u8]>>(bytes: I) -> BStringLc {
         BStringLc(bytes.as_ref().to_ascii_lowercase())
     }
 
+    /// Replaces the bytes in this string with some new ones.
+    ///
+    /// `self.set_from_bytes(..)` is equivalent to `*self = from_bytes(..)`, except that it will
+    /// try to reuse its allocation.
     pub fn set_from_bytes<I: AsRef<[u8]>>(&mut self, bytes: I) {
         self.0.clear();
         self.0.extend_from_slice(bytes.as_ref());

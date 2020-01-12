@@ -50,7 +50,12 @@ pub struct Error {
 #[derive(Clone, Debug)]
 pub enum ErrorKind {
     /// An entry tried to cross-reference a non-existent entry.
-    BadCrossReference { child: BString, parent: BString },
+    BadCrossReference {
+        /// The key of the entry that contained the cross-reference.
+        child: BString,
+        /// The (missing) key that was referenced.
+        parent: BString
+    },
     /// We encountered the end of the file before we expected to.
     UnexpectedEOF,
     /// We were expecting to see an identifier, but instead we found a character that isn't allowed
@@ -100,7 +105,12 @@ pub enum WarningKind {
     MissingEntry(BString),
     /// We encountered a nested cross-reference: an entry that was referenced in a `crossref` field
     /// has a `crossref` field of its own.
-    NestedCrossRef { child: BString, parent: BString },
+    NestedCrossRef {
+        /// The key of the entry that was cross-referenced and contained a cross-reference.
+        child: BString,
+        /// The key that `child` referenced.
+        parent: BString
+    },
     /// We tried to expand a string during its own definition.
     RecursiveString(Vec<u8>),
     /// We tried to expand a string that wasn't defined.
