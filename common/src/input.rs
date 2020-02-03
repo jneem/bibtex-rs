@@ -1,21 +1,36 @@
 use std::io;
 
-/// A helper for reading input line-by-line.
-pub struct Input<'read> {
-    read: Box<dyn io::BufRead + 'read>,
-    // A buffer containing the current line.
-    line: Vec<u8>,
-    line_num: usize,
-    // The index of the next character to be read from the current line.
-    col: usize,
-    saw_eof: bool,
+#[derive(Debug, PartialEq)]
+pub enum LexClass {
+    Illegal,
+    WhiteSpace,
+    SepChar,
+    Numeric,
+    Alpha,
+    Other,
 }
 
-// This is Bibtex's definition of whitespace. It's a bit puzzling that it includes '\r' but not
-// '\n'. It shouldn't make a difference, though, because either '\r' or '\n' is considered a line
-// terminator, and gets trimmed in `Input::input_line`.
+pub fn lex_class(b: u8) -> LexClass {
+    use LexClass::*;
+
+    match b {
+        // Strangely, bibtex.c doesn't seem to count '\n' as whitespace. Anyway, it doesn't matter
+        // because `Input::input_line` always trims it.
+        b'\t' | b'\r' | b' ' => WhiteSpace,
+        b'-' | b'~' => SepChar,
+        b'0'..=b'9' => Numeric,
+        0..=31 | 127 => Illegal,
+        b'A'..=b'Z' | b'a'..=b'z' | 128..=255 => Alpha,
+        _ => Other,
+    }
+}
+
 pub fn is_white(b: u8) -> bool {
-    b == b'\t' || b == b'\r' || b == b' '
+    lex_class(b) == LexClass::WhiteSpace
+}
+
+pub fn is_numeric(b: u8) -> bool {
+    b'0' <= b && b <= b'9'
 }
 
 pub fn is_id(b: u8) -> bool {
@@ -27,6 +42,17 @@ pub fn is_id(b: u8) -> bool {
 
 pub fn is_digit(b: u8) -> bool {
     b'0' <= b && b <= b'9'
+}
+
+/// A helper for reading input line-by-line.
+pub struct Input<'read> {
+    read: Box<dyn io::BufRead + 'read>,
+    // A buffer containing the current line.
+    line: Vec<u8>,
+    line_num: usize,
+    // The index of the next character to be read from the current line.
+    col: usize,
+    saw_eof: bool,
 }
 
 impl<'read> Input<'read> {
