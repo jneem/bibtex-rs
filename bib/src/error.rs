@@ -21,27 +21,6 @@ fn xchrs(cs: &[u8]) -> String {
     cs.into_iter().cloned().map(xchr).collect()
 }
 
-/// This struct represents an error that occurred while parsing a `.bib` file. It also stores the
-/// location of the error in that file.
-///
-/// An `Error` is capable of producing BibTex-compatible error messages, with the
-/// [`Error::write_comwrite_compatible_errmsg`] function.
-// TODO: should this implement std::Error?
-#[derive(Clone, Debug)]
-pub struct Error {
-    /// What kind of error is this?
-    pub kind: ErrorKind,
-    /// In which context did this error occur?
-    pub context: Option<ErrorContext>,
-
-    /// The state of the input when the error occurred.
-    ///
-    /// Note that storing a clone of the input state here is not the most efficient possible thing
-    /// (because much of the time we could probably get away without cloning it). But it's
-    /// convenient, and optimizing the error case probably isn't so important.
-    pub state: InputState,
-}
-
 /// These are the kinds of errors that might be encountered in a `.bib` file.
 ///
 /// Most of these error kinds correspond to a particular error message that you might get from
@@ -49,13 +28,6 @@ pub struct Error {
 /// EOF).
 #[derive(Clone, Debug)]
 pub enum ErrorKind {
-    /// An entry tried to cross-reference a non-existent entry.
-    BadCrossReference {
-        /// The key of the entry that contained the cross-reference.
-        child: BString,
-        /// The (missing) key that was referenced.
-        parent: BString
-    },
     /// We encountered the end of the file before we expected to.
     UnexpectedEOF,
     /// We were expecting to see an identifier, but instead we found a character that isn't allowed
@@ -95,12 +67,25 @@ pub enum ErrorContext {
     Entry,
 }
 
-/// These are the kinds of warnings that might be encountered in a `.bib` file.
+/// These are the kinds of warnings that might be encountered while parsing a `.bib` file.
 ///
 /// The dividing line between errors and warnings seems to be that upon an error, skip over the
 /// rest of the input until a blank line is encountered.
 #[derive(Clone, Debug)]
 pub enum WarningKind {
+    /// We tried to expand a string during its own definition.
+    RecursiveString(Vec<u8>),
+    /// We tried to expand a string that wasn't defined.
+    UndefinedString(Vec<u8>),
+    /// We encountered an unknown entry type. (The payload here is the key of the entry, not the
+    /// type.)
+    UnknownEntryType(Vec<u8>),
+}
+
+/// These are the kinds of warnings that might be encountered while resolving cross-references
+/// in a `.bib` file.
+#[derive(Clone, Debug)]
+pub enum DatabaseWarningKind {
     /// We were expecting to find an entry that wasn't there.
     MissingEntry(BString),
     /// We encountered a nested cross-reference: an entry that was referenced in a `crossref` field
@@ -111,207 +96,116 @@ pub enum WarningKind {
         /// The key that `child` referenced.
         parent: BString
     },
-    /// We tried to expand a string during its own definition.
-    RecursiveString(Vec<u8>),
-    /// We tried to expand a string that wasn't defined.
-    UndefinedString(Vec<u8>),
-    /// We encountered an unknown entry type. (The payload here is the key of the entry, not the
-    /// type.)
-    UnknownEntryType(Vec<u8>),
 }
 
-/// These are the two categories of problems that can occur while parsing a `.bib` file.
-#[derive(Clone, Debug)]
-pub enum ProblemKind {
-    /// A warning is a problem that isn't particularly severe. At worst, it can result in messing
-    /// up some field of an entry.
-    Warning(WarningKind),
-    /// An error is a more severe problem. When we encounter an error in an entry, for example, we
-    /// skip over the rest of that entry.
-    Error(ErrorKind),
-}
+// This corresponds to WEB section 221 in BibTex. It prints the line number, the contents of
+// the bad line, and the text "skipping whatever remains".
+fn common_err_msg(write: &mut dyn io::Write, ctxt: ErrorContext, input: &Input, filename: &str) -> io::Result<()> {
+    writeln!(write, "---line {} of file {}", input.cur_line_num(), filename)?;
 
-/// This struct represents a problem that occurred while parsing a `.bib` file. It also stores the
-/// location of the warning in that file.
-///
-/// An `Warning` is capable of producing BibTex-compatible error messages, with the
-/// [`Warning::write_comwrite_compatible_errmsg`] function.
-#[derive(Clone, Debug)]
-pub struct Problem {
-    /// What kind of problem is this?
-    pub kind: ProblemKind,
-
-    /// In which context did this error occur?
-    pub context: Option<ErrorContext>,
-
-    /// The state of the input when the error occurred.
-    ///
-    /// Note that storing a clone of the input state here is not the most efficient possible thing
-    /// (because much of the time we could probably get away without cloning it). But it's
-    /// convenient, and optimizing the error case probably isn't so important.
-    ///
-    /// Note that not every warning comes from a specific part of the input (e.g. MissingEntry). It
-    /// would be nice to express this is a more typesafe way.
-    pub state: Option<InputState>,
-}
-
-impl Problem {
-    pub(crate) fn from_warning(kind: WarningKind, input: &Input<'_>) -> Problem {
-        Problem {
-            kind: ProblemKind::Warning(kind),
-            context: None,
-            state: Some(InputState::new(input)),
-        }
-    }
-
-    pub(crate) fn from_warning_no_input(kind: WarningKind) -> Problem {
-        Problem {
-            kind: ProblemKind::Warning(kind),
-            context: None,
-            state: None,
-        }
-    }
-
-    pub(crate) fn from_error(kind: ErrorKind, input: &Input<'_>) -> Problem {
-        Problem {
-            kind: ProblemKind::Error(kind),
-            context: None,
-            state: Some(InputState::new(input)),
-        }
-    }
-
-    pub(crate) fn from_error_no_input(kind: ErrorKind) -> Problem {
-        Problem {
-            kind: ProblemKind::Error(kind),
-            context: None,
-            state: None,
-        }
-    }
-
-    pub(crate) fn from_error_with_context(kind: ErrorKind, context: ErrorContext, input: &Input<'_>) -> Problem {
-        Problem {
-            kind: ProblemKind::Error(kind),
-            context: Some(context),
-            state: Some(InputState::new(input)),
-        }
-    }
-
-    // Prints the current line, divided into two at the current column. Whitespace characters are
+    // Print the current line, divided into two at the current column. Whitespace characters are
     // replaced by spaces.
-    fn print_input_line(&self, write: &mut dyn io::Write) -> io::Result<()> {
-        fn map_space(buf: &[u8]) -> Vec<u8> {
-            buf.iter().map(|&c| if is_white(c) { b' ' } else { c }).collect()
-        }
-
-        let state = self.state.as_ref().unwrap();
-        let before: Vec<u8> = map_space(&state.line[..state.col_num]);
-        let spaces = vec![b' '; before.len()];
-        let after: Vec<u8> = map_space(&state.line[state.col_num..]);
-        write.write_all(b" : ")?;
-        write.write_all(&before)?;
-        write.write_all(b"\n : ")?;
-        write.write_all(&spaces)?;
-        write.write_all(&after)?;
-        write.write_all(b"\n")?;
-
-        if before.iter().all(|&c| is_white(c)) {
-            write.write_all(b"(Error may have been on previous line)\n")?;
-        }
-        Ok(())
+    fn map_space(buf: &[u8]) -> Vec<u8> {
+        buf.iter().map(|&c| if is_white(c) { b' ' } else { c }).collect()
     }
 
-    // This corresponds to WEB section 221 in BibTex. It prints the line number, the contents of
-    // the bad line, and the text "skipping whatever remains".
-    fn common_err_msg(&self, write: &mut dyn io::Write, filename: &str) -> io::Result<()> {
-        let state = self.state.as_ref().unwrap();
-        writeln!(write, "---line {} of file {}", state.line_num, filename)?;
-        self.print_input_line(write)?;
-        let context = match self.context {
-            Some(ErrorContext::Command) => "command",
-            Some(ErrorContext::Entry) => "entry",
-            None => "unknown thing",
-        };
-        writeln!(write, "I'm skipping whatever remains of this {}", context)?;
-        Ok(())
+    let col_num = input.cur_col_num();
+    let before: Vec<u8> = map_space(&input.cur_line()[..col_num]);
+    let spaces = vec![b' '; before.len()];
+    let after: Vec<u8> = map_space(&input.cur_line()[col_num..]);
+    write.write_all(b" : ")?;
+    write.write_all(&before)?;
+    write.write_all(b"\n : ")?;
+    write.write_all(&spaces)?;
+    write.write_all(&after)?;
+    write.write_all(b"\n")?;
+
+    if before.iter().all(|&c| is_white(c)) {
+        write.write_all(b"(Error may have been on previous line)\n")?;
     }
+    let context = match ctxt {
+        ErrorContext::Command => "command",
+        ErrorContext::Entry => "entry",
+    };
+    writeln!(write, "I'm skipping whatever remains of this {}", context)?;
+    Ok(())
+}
 
-    fn common_warn_msg(&self, write: &mut dyn io::Write, filename: &str) -> io::Result<()> {
-        writeln!(write, "--line {} of file {}", self.state.as_ref().unwrap().line_num, filename)?;
-        Ok(())
-    }
+fn common_warn_msg(write: &mut dyn io::Write, input: &Input, filename: &str) -> io::Result<()> {
+    writeln!(write, "--line {} of file {}", input.cur_line_num(), filename)?;
+    Ok(())
+}
 
-    fn write_compatible_errmsg_dyn(&self, kind: &ErrorKind, write: &mut dyn io::Write, filename: &str) -> io::Result<()> {
-        use ErrorKind::*;
+fn write_compatible_err(write: &mut dyn io::Write, kind: &ErrorKind, ctxt: ErrorContext, input: &Input, filename: &str) -> io::Result<()> {
+    use ErrorKind::*;
 
-        macro_rules! err {
-            ($($args:expr),*) => {
-                {
-                    write!(write, $($args,)*)?;
-                    self.common_err_msg(write, filename)?;
-                }
+    macro_rules! err {
+        ($($args:expr),*) => {
+            {
+                write!(write, $($args,)*)?;
+                common_err_msg(write, ctxt, input, filename)?;
             }
-        };
-
-        match *kind {
-            BadCrossReference { ref child, ref parent} =>
-                writeln!(
-                    write,
-                    "A bad cross reference---entry \"{}\"\nrefers to entry \"{}\", which doesn't exist",
-                    xchrs(child),
-                    xchrs(parent))?,
-            UnexpectedEOF => err!("Illegal end of database file"),
-            ExpectedEquals => err!("I was expecting an \"=\""),
-            ExpectedEither(a, b) => err!("I was expecting a `{}' or a `{}'", xchr(a), xchr(b)),
-            UnterminatedPreamble(a) => err!("Missing \"{}\" in preamble command", xchr(a)),
-            UnterminatedString(a) => err!("Missing \"{}\" in string command", xchr(a)),
-            EmptyId(kind) => err!("You're missing {}", kind),
-            InvalidIdChar(kind) => err!("\"{}\" immediately follows {}", xchr(self.state.as_ref().unwrap().line[self.state.as_ref().unwrap().col_num]), kind),
-            RepeatedEntry => err!("Repeated entry"),
-            UnbalancedBraces => err!("Unbalanced braces"),
-            Io(ref e) => err!("I/O error {}", e),
         }
-        Ok(())
+    };
+
+    match *kind {
+        UnexpectedEOF => err!("Illegal end of database file"),
+        ExpectedEquals => err!("I was expecting an \"=\""),
+        ExpectedEither(a, b) => err!("I was expecting a `{}' or a `{}'", xchr(a), xchr(b)),
+        UnterminatedPreamble(a) => err!("Missing \"{}\" in preamble command", xchr(a)),
+        UnterminatedString(a) => err!("Missing \"{}\" in string command", xchr(a)),
+        EmptyId(kind) => err!("You're missing {}", kind),
+        InvalidIdChar(kind) => err!("\"{}\" immediately follows {}", xchr(input.cur_line()[input.cur_col_num()]), kind),
+        RepeatedEntry => err!("Repeated entry"),
+        UnbalancedBraces => err!("Unbalanced braces"),
+        Io(ref e) => err!("I/O error {}", e),
     }
+    Ok(())
+}
 
-    fn write_compatible_warnmsg_dyn(&self, kind: &WarningKind, write: &mut dyn io::Write, filename: &str) -> io::Result<()> {
-        use WarningKind::*;
+fn write_crossref_err(write: &mut dyn io::Write, child: &[u8], parent: &[u8]) -> io::Result<()> {
+    writeln!(
+        write,
+        "A bad cross reference---entry \"{}\"\nrefers to entry \"{}\", which doesn't exist",
+        xchrs(child),
+        xchrs(parent))
+}
 
-        macro_rules! warn {
-            ($($args:expr),*) => {
-                {
-                    writeln!(write, $($args,)*)?;
-                    self.common_warn_msg(write, filename)?;
-                }
+fn write_compatible_warning(write: &mut dyn io::Write, kind: &WarningKind, input: &Input, filename: &str) -> io::Result<()> {
+    use WarningKind::*;
+
+    macro_rules! warn {
+        ($($args:expr),*) => {
+            {
+                writeln!(write, $($args,)*)?;
+                common_warn_msg(write, input, filename)?;
             }
-        };
-
-        match kind {
-            MissingEntry(ref name) => writeln!(write, "Warning--I didn't find a database entry for \"{}\"", xchrs(name))?,
-            NestedCrossRef { ref child, ref parent } =>
-                writeln!(
-                    write,
-                    "Warning--you've nested cross references--entry \"{}\"\nrefers to entry \"{}\", which also refers to something",
-                    xchrs(child),
-                    xchrs(parent))?,
-            RecursiveString(ref name) => warn!("Warning--string name \"{}\" is used in its own definition", xchrs(name)),
-            UndefinedString(ref name) => warn!("Warning--string name \"{}\" is undefined", xchrs(name)),
-            UnknownEntryType(ref key) => warn!("Warning--entry type for \"{}\" isn't style-file defined", xchrs(key)),
         }
+    };
 
-        Ok(())
+    match kind {
+        RecursiveString(ref name) => warn!("Warning--string name \"{}\" is used in its own definition", xchrs(name)),
+        UndefinedString(ref name) => warn!("Warning--string name \"{}\" is undefined", xchrs(name)),
+        UnknownEntryType(ref key) => warn!("Warning--entry type for \"{}\" isn't style-file defined", xchrs(key)),
     }
 
-    /// Writes (to `write`) an error message identical to one that `BibTex` would produce.
-    ///
-    /// Because BibTex's error messages can include the name of the input file, you need to tell us
-    /// what it is.
-    pub fn write_compatible_errmsg<W: io::Write>(&self, mut write: W, filename: &str) -> io::Result<()> {
-        match self.kind {
-            ProblemKind::Error(ref err) => self.write_compatible_errmsg_dyn(err, &mut write, filename),
-            ProblemKind::Warning(ref w) => self.write_compatible_warnmsg_dyn(w, &mut write, filename),
-        }
+    Ok(())
+}
+
+fn write_compatible_db_warning(write: &mut dyn io::Write, kind: &DatabaseWarningKind) -> io::Result<()> {
+    use DatabaseWarningKind::*;
+
+    match kind {
+        MissingEntry(ref name) => writeln!(write, "Warning--I didn't find a database entry for \"{}\"", xchrs(name)),
+        NestedCrossRef { ref child, ref parent } =>
+            writeln!(
+                write,
+                "Warning--you've nested cross references--entry \"{}\"\nrefers to entry \"{}\", which also refers to something",
+                xchrs(child),
+                xchrs(parent)),
     }
 }
+
 
 /// These are the various places that identifiers can occur in a `.bib` file.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -345,40 +239,61 @@ impl std::fmt::Display for IdentifierKind {
 /// An `ProblemReporter` provides hooks for the parser to call when it encounters an error or a
 /// warning.
 pub trait ProblemReporter {
-    /// This is called whenever the parser encounters a problem.
-    fn report(&mut self, problem: &Problem);
+    /// Reports an error that occurred while parsing a `.bib` file.
+    fn parse_error(&mut self, error: &ErrorKind, ctxt: ErrorContext, input: &Input);
+
+    /// Reports an invalid crossreference that occurred in a `.bib` file (this isn't one of the error
+    /// types handled by `parse_error` because invalid crossreferences are detected after the input
+    /// is completely read, so there is no corresponding input location).
+    fn crossref_error(&mut self, child: &[u8], parent: &[u8]);
+
+	/// Reports a warning that occurred while parsing a `.bib` file.
+    fn parse_warning(&mut self, warning: &WarningKind, input: &Input);
+
+    /// Reports a warning that occurred while post-processing a `.bib` file.
+    fn database_warning(&mut self, warning: &DatabaseWarningKind);
 }
 
 /// The `ProblemReporter` impl for `()` simply ignores all errors and warnings.
 impl ProblemReporter for () {
-    fn report(&mut self, _: &Problem) {}
+    fn parse_error(&mut self, _error: &ErrorKind, _ctxt: ErrorContext, _input: &Input) {}
+    fn crossref_error(&mut self, _child: &[u8], _parent: &[u8]) {}
+
+    fn parse_warning(&mut self, _warning: &WarningKind, _input: &Input) {}
+    fn database_warning(&mut self, _warning: &DatabaseWarningKind) {}
 }
 
-/// Stores the state of the input where an error or a warning occurred.
-#[derive(Clone, Debug, PartialEq)]
-pub struct InputState {
-    /// The number of the line (starting from 1) where the error occurred.
-    pub line_num: usize,
-    /// The column where the error occurred.
-    pub col_num: usize,
-    /// The contents of the line where the error occurred.
-    pub line: Vec<u8>,
+/// `CompatibleProblemReporter` implements `ProblemReporter` by writing all error messages
+/// to `write`, in a bibtex-compatible format. It also sets `found_error` to `true` if any
+/// error was reported.
+pub struct CompatibleProblemReporter<'a, W: io::Write> {
+    /// All error messages will be written here.
+    pub write: W,
+
+    /// The name of the `.bib` file (used for writing the error messages).
+    pub filename: &'a str,
+
+    /// This will be set to `true` if an error is reported.
+    pub found_error: bool,
 }
 
-impl InputState {
-    /// Returns a copy of the current state of the input.
-    pub fn new(input: &Input) -> InputState {
-        InputState {
-            line_num: input.cur_line_num(),
-            col_num: input.cur_col_num(),
-            line: input.cur_line().to_owned(),
-        }
+impl<'a, 'b, W: io::Write> ProblemReporter for &'a mut CompatibleProblemReporter<'b, W> {
+    fn parse_error(&mut self, error: &ErrorKind, ctxt: ErrorContext, input: &Input) {
+        self.found_error = true;
+        let _ = write_compatible_err(&mut self.write, error, ctxt, input, &self.filename);
+    }
+
+    fn crossref_error(&mut self, child: &[u8], parent: &[u8]) {
+        self.found_error = true;
+        let _ = write_crossref_err(&mut self.write, child, parent);
+    }
+
+    fn parse_warning(&mut self, warning: &WarningKind, input: &Input) {
+        let _ = write_compatible_warning(&mut self.write, warning, input, &self.filename);
+    }
+
+    fn database_warning(&mut self, warning: &DatabaseWarningKind) {
+        let _ = write_compatible_db_warning(&mut self.write, warning);
     }
 }
 
-/// This `ProblemReporter` impl just saves all of the problems into a big `Vec`.
-impl<'a> ProblemReporter for &'a mut Vec<Problem> {
-    fn report(&mut self, p: &Problem) {
-        self.push(p.clone());
-    }
-}

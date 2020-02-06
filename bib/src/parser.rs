@@ -3,7 +3,7 @@ use common::input::is_white;
 use std::collections::HashMap;
 
 use crate::{BStringLc, DatabaseBuilder, Entry};
-use crate::error::{ErrorContext, ErrorKind, IdentifierKind, Problem, ProblemReporter, WarningKind};
+use crate::error::{ErrorContext, ErrorKind, IdentifierKind, ProblemReporter, WarningKind};
 
 trait ResultExt<T> {
     fn or_bail(self, p: &mut Parser, ctxt: ErrorContext) -> Option<T>;
@@ -14,7 +14,7 @@ impl<T> ResultExt<T> for Result<T, ErrorKind> {
         match self {
             Ok(t) => Some(t),
             Err(e) => {
-                p.report.report(&Problem::from_error_with_context(e, ctxt, &p.input));
+                p.error(e, ctxt);
                 None
             }
         }
@@ -98,6 +98,14 @@ impl<'read, 'error> Parser<'read, 'error> {
         EntriesIter {
             parser: self,
         }
+    }
+
+    fn error(&mut self, e: ErrorKind, ctxt: ErrorContext) {
+        self.report.parse_error(&e, ctxt, &self.input);
+    }
+
+    fn warn(&mut self, w: WarningKind) {
+        self.report.parse_warning(&w, &self.input);
     }
 
     // If the current character is the expected one, consumes it. Otherwise, returns an error.
@@ -221,14 +229,14 @@ impl<'read, 'error> Parser<'read, 'error> {
                 } else if Some(&id[..]) == cur_macro {
                     // Someone attempted a recursive macro definition. Issue a warning and
                     // substitute the empty string.
-                    self.report.report(&Problem::from_warning(WarningKind::RecursiveString(id), &self.input));
+                    self.warn(WarningKind::RecursiveString(id));
                     Ok(Vec::new())
                 } else if let Some(val) = self.db.strings.get(&id) {
                     Ok(val.to_owned())
                 } else {
                     // The macro hasn't been defined yet, but we don't error out (because BibTex
                     // doesn't). Just issue a warning and substitute the empty string.
-                    self.report.report(&Problem::from_warning(WarningKind::UndefinedString(id), &self.input));
+                    self.warn(WarningKind::UndefinedString(id));
                     Ok(Vec::new())
                 }
             }
@@ -370,13 +378,13 @@ impl<'read, 'error> Parser<'read, 'error> {
 
         if let Some(ref mut check) = self.db.entry_type_checker {
             if !check(&kind) {
-                self.report.report(&Problem::from_warning(WarningKind::UnknownEntryType(key.clone()), &self.input));
+                self.warn(WarningKind::UnknownEntryType(key.clone()));
             }
         }
 
         let lc_key = BStringLc::from_bytes(&key);
         if self.db.contains_entry(&lc_key) {
-            self.report.report(&Problem::from_error_with_context(ErrorKind::RepeatedEntry, ErrorContext::Entry, &self.input));
+            self.error(ErrorKind::RepeatedEntry, ErrorContext::Entry);
             return None;
         }
 
@@ -453,7 +461,7 @@ impl<'read, 'error> Parser<'read, 'error> {
 
             while !self.input.skip_to(|c| c == b'@') {
                 if let Err(e) = self.input.input_line() {
-                    self.report.report(&Problem::from_error(e.into(), &self.input));
+                    self.error(e.into(), ErrorContext::Entry);
                     continue;
                 } else if self.input.is_eof() {
                     return None;
@@ -525,7 +533,6 @@ mod tests {
             use ErrorKind::*;
     
             match (self, other) {
-                (BadCrossReference { child: ref c, parent: ref p }, BadCrossReference { child: ref d, parent: ref q }) => c == d && p == q,
                 (UnexpectedEOF, UnexpectedEOF) => true,
                 (UnbalancedBraces, UnbalancedBraces) => true,
                 (EmptyId(a), EmptyId(b)) => a == b,

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{BString, BStringLc, Entry, Parser};
 use crate::citation_list::{CitationList, CrossrefList};
-use crate::error::{ErrorKind, Problem, ProblemReporter, WarningKind};
+use crate::error::{DatabaseWarningKind, ProblemReporter};
 
 /// A `DatabaseBuilder` creates a collection of [`Entry`]s by reading one or more `bib` files.
 /// Compared to the simple `bib`-reading interface provided by [`Parser`], this one is more
@@ -328,12 +328,12 @@ impl DatabaseBuilder {
                 let on_cite_list = self.citation_list.contains(&parent_lc);
 
                 if !parent_found {
-                    report.report(&Problem::from_error_no_input(ErrorKind::BadCrossReference { child: child_key.clone(), parent: parent_key.clone() }));
+                    report.crossref_error(&child_key, &parent_key);
                 }
 
                 if let Some(&parent_idx) = self.entry_index.get(&parent_lc) {
                     if self.entries[parent_idx].fields.contains_key(&b"crossref"[..]) {
-                        report.report(&Problem::from_warning_no_input(WarningKind::NestedCrossRef { child: child_key.clone(), parent: parent_key.clone() }));
+                        report.database_warning(&DatabaseWarningKind::NestedCrossRef { child: child_key.clone(), parent: parent_key.clone() });
                     }
                 }
 
@@ -347,7 +347,7 @@ impl DatabaseBuilder {
     fn complain_about_missing_entries(&self, report: &mut impl ProblemReporter) {
         for key in self.citation_list.keys.iter().chain(self.extra_list.list.keys.iter()) {
             if !self.contains_entry(&BStringLc::from_bytes(key)) {
-                report.report(&Problem::from_warning_no_input(WarningKind::MissingEntry(key.clone())));
+                report.database_warning(&DatabaseWarningKind::MissingEntry(key.clone()));
             }
         }
     }

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use tempfile::{TempDir, tempdir};
 
 use bib::DatabaseBuilder;
-use bib::error::ProblemKind;
+use bib::error::CompatibleProblemReporter;
 
 pub struct BibtexRunner {
     bib_data: Vec<u8>,
@@ -73,13 +73,14 @@ impl BibtexRunner {
     }
 
     /// Asserts that the reference bibtex and our implementation give the same parse errors (and,
-    /// if `check_warnings` is true, also checks warning messages. Returns true if the parse
-    /// succeeded with no errors.
-    pub fn check_ours(&mut self, check_warnings: bool) -> bool {
+    pub fn check_ours(&mut self) -> bool {
         let reference_output = self.reference_output();
-        let mut found_error = false;
-        let mut errors = Vec::new();
         let mut error_buf = Vec::new();
+        let mut report = CompatibleProblemReporter {
+            write: &mut error_buf,
+            filename: "min.bib",
+            found_error: false,
+        };
 
         // These need to match the ENTRY command in the included .bst file, which is hard-coded for
         // now.
@@ -96,10 +97,10 @@ impl BibtexRunner {
         db.with_entry_type_checker(|s| s == b"article")
             .with_field_name_checker(move |s| known_fields.get(s).is_some());
 
-        db.merge_bib_file(&self.bib_data[..], &mut errors);
+        db.merge_bib_file(&self.bib_data[..], &mut report);
 
         let mut lines = Vec::new();
-        for entry in db.into_entries(&mut errors) {
+        for entry in db.into_entries(&mut report) {
             if !entry.key.is_empty() { 
                 // because of the FIXME above, we have to filter out empty keys here too.
                 lines.push(BString::from(entry.key.clone()))
@@ -118,18 +119,8 @@ impl BibtexRunner {
             add_field(b"author");
         }
 
-        for err in errors {
-            // FIXME: We only check for equality of the error messages, not the warning messages.
-            // That's because some of the warning messages that we want to test for don't show up
-            // in bibtex. For example, bibtex doesn't do macro substitution for field types it
-            // doesn't know, and so it doesn't raise warnings for those.
-            if let ProblemKind::Error(_) = err.kind {
-                err.write_compatible_errmsg(&mut error_buf, "min.bib").unwrap();
-                found_error = true;
-            } else if check_warnings {
-                err.write_compatible_errmsg(&mut error_buf, "min.bib").unwrap();
-            }
-        }
+		let found_error = report.found_error;
+		drop(report);
 
         assert_eq!(lines, reference_output.bbl_lines);
         assert_eq!(BString::from(error_buf.to_ascii_lowercase()), BString::from(reference_output.stdout.to_ascii_lowercase()));
@@ -170,7 +161,7 @@ macro_rules! list_entries_success {
         #[test]
         fn $test_name() {
             let mut runner = $crate::BibtexRunner::new(include_bytes!($bib_file));
-            assert!(runner.check_ours(true));
+            assert!(runner.check_ours());
         }
     };
 
@@ -179,7 +170,7 @@ macro_rules! list_entries_success {
         fn $test_name() {
             let mut runner = $crate::BibtexRunner::new(include_bytes!($bib_file));
             runner.set_citation_list(&$citations[..]);
-            assert!(runner.check_ours(true));
+            assert!(runner.check_ours());
         }
     };
 }
@@ -190,7 +181,7 @@ macro_rules! list_entries_failure {
         #[test]
         fn $test_name() {
             let mut runner = $crate::BibtexRunner::new(include_bytes!($bib_file));
-            assert!(!runner.check_ours(true));
+            assert!(!runner.check_ours());
         }
     };
 
@@ -199,7 +190,7 @@ macro_rules! list_entries_failure {
         fn $test_name() {
             let mut runner = $crate::BibtexRunner::new(include_bytes!($bib_file));
             runner.set_citation_list(&$citations[..]);
-            assert!(!runner.check_ours(true));
+            assert!(!runner.check_ours());
         }
     };
 }

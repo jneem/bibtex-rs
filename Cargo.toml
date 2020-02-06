@@ -6,5 +6,4 @@ members = [
     "common",
     "driver",
     "system_bibtex_tester",
-    "tectonic_tester",
 ]
