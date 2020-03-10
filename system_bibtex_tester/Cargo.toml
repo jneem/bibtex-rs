@@ -7,5 +7,6 @@ edition = "2018"
 [dependencies]
 bib = { path = "../bib/" }
 bstr = "0.2.8"
+common = { path = "../common/" }
 tempfile = "3.1"
 

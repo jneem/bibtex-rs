@@ -1,9 +1,11 @@
 use bstr::{BStr, BString, ByteSlice};
 use std::collections::HashSet;
+use std::io::Write;
 use tempfile::{TempDir, tempdir};
 
 use bib::DatabaseBuilder;
 use bib::error::CompatibleProblemReporter;
+use common::name::{SplitNames, TokenizedName};
 
 pub struct BibtexRunner {
     bib_data: Vec<u8>,
@@ -40,7 +42,6 @@ impl BibtexRunner {
         let mut aux_data = Vec::new();
         let aux_path = self.dir.path().join("min.aux");
 
-        use std::io::Write;
         writeln!(&mut aux_data, "\\bibstyle{{min}}").unwrap();
         writeln!(&mut aux_data, "\\bibdata{{min}}").unwrap();
         for c in self.citation_list.as_ref().unwrap() {
@@ -155,6 +156,85 @@ fn trim_stdout(bibtex_stdout: &BStr) -> BString {
     ret
 }
 
+pub struct NameChecker {
+    dir: TempDir,
+    names: BString,
+}
+
+impl NameChecker {
+    pub fn new() -> NameChecker {
+        let dir = tempdir().unwrap();
+        let aux_path = dir.path().join("names.aux");
+        std::fs::write(&aux_path, &b"\\bibstyle{names}"[..]).unwrap();
+
+        NameChecker {
+            dir,
+            names: BString::from(""),
+        }
+    }
+
+    pub fn set_names(&mut self, names: &[u8]) {
+        // There are two natural ways to feed a name into bibtex. One is to put it in a .bib file
+        // and ask bibtex to parse it. The other is to embed it directly into the bst file. Both
+        // of these come with limitations in terms of what names they will accept. In particular,
+        // the bst parser doesn't allow '"' inside a string, while the bib parser doesn't allow
+        // unbalanced braces. For now, we'll use the bst method, and so we forbid '"'.
+        assert!(!names.is_empty());
+        assert!(names.iter().position(|&c| c == b'"').is_none());
+
+        self.names = BString::from(names);
+
+        let bst_path = self.dir.path().join("names.bst");
+        let names = BString::from(names);
+        let bst_text = format!(
+            r#"
+            ENTRY {{}}{{}}{{}}
+
+            FUNCTION {{test}}
+            {{ "{}"
+            #1 "{{ff}} -- {{vv}} -- {{ll}} -- {{jj}}" format.name$ top$ }}
+
+            READ
+
+            EXECUTE{{test}}
+            "#,
+            names);
+
+        std::fs::write(&bst_path, &bst_text).unwrap();
+    }
+
+    pub fn reference_output(&mut self) -> BString {
+        let output = std::process::Command::new("bibtex")
+            .current_dir(self.dir.path())
+            .arg("names")
+            .output()
+            .expect("failed to run bibtex");
+
+        // There is only one interesting line (and a bunch of warnings). Find it.
+        let output = <&BStr>::from(&output.stdout[..]);
+        let output = <&BStr>::from(output.lines().skip(6).next().unwrap());
+        dbg!(output);
+        BString::from(output)
+    }
+
+    pub fn our_output(&self) -> BString {
+        let n = SplitNames::from_bytes(&self.names);
+        let t = TokenizedName::from_bytes(&n[0]);
+        dbg!(&t);
+
+        let mut ret = Vec::new();
+
+        write!(
+            &mut ret, "{} -- {} -- {} -- {}",
+            <&BStr>::from(t.first()),
+            <&BStr>::from(t.von()),
+            <&BStr>::from(t.last()),
+            <&BStr>::from(t.jr())
+        ).unwrap();
+        BString::from(ret)
+    }
+}
+
 #[macro_export]
 macro_rules! list_entries_success {
     ($test_name:ident, $bib_file:expr) => {
@@ -195,7 +275,6 @@ macro_rules! list_entries_failure {
     };
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,7 +284,7 @@ mod tests {
     {
         let mut runner = BibtexRunner::new(b"@article{mykey, title={mytitle},}");
         let output = runner.reference_output();
-        assert_eq!(output.bbl_lines, vec!["mykey".to_owned()]);
+        assert_eq!(output.bbl_lines, vec!["mykey".to_owned(), "title: mytitle".to_owned()]);
 
         runner.set_bib_input(b"@article{mykey, title={mytitle},");
         let output = runner.reference_output();
