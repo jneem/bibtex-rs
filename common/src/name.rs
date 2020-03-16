@@ -1,3 +1,4 @@
+use crate::braced::{braced_tokens, Token};
 use crate::input::{lex_class, LexClass};
 
 /// A struct for splitting a collection of names.
@@ -23,34 +24,24 @@ impl SplitNames {
     // Returns the index of the next "and".
     fn next_and(&self, start: usize) -> Option<usize> {
         let mut after_space = false;
-        let mut i = start;
-        while i < self.bytes.len() {
-            let ch = self.bytes[i];
-            if lex_class(ch) == LexClass::WhiteSpace {
-                after_space = true;
-                i += 1;
-            } else {
-                match ch {
-                    b'a' | b'A' => {
-                        if after_space
-                                && self.bytes.len() > i + 3
-                                && self.bytes[i + 1].to_ascii_lowercase() == b'n'
-                                && self.bytes[i + 2].to_ascii_lowercase() == b'd'
-                                && lex_class(self.bytes[i + 3]) == LexClass::WhiteSpace {
-                            return Some(i);
-                        } else {
-                            i += 1;
-                        }
-                    },
-                    b'{' => {
-                        i += 1;
-                        i += braced_string_end(&self.bytes[i..]).len();
-                    }
-                    _ => {
-                        i += 1;
+        let slice = &self.bytes[start..];
+        for tok in braced_tokens(slice) {
+            match tok {
+                Token::Byte { ch, idx } => {
+                    if lex_class(ch) == LexClass::WhiteSpace {
+                        after_space = true;
+                    } else if after_space
+                            && ch.to_ascii_lowercase() == b'a'
+                            && slice.len() > idx + 3
+                            && slice[idx + 1].to_ascii_lowercase() == b'n'
+                            && slice[idx + 2].to_ascii_lowercase() == b'd'
+                            && lex_class(slice[idx + 3]) == LexClass::WhiteSpace {
+                        return Some(start + idx);
+                    } else {
+                        after_space = false;
                     }
                 }
-                after_space = false;
+                _ => { after_space = false; }
             }
         }
         None
@@ -106,7 +97,8 @@ pub struct TokenizedName {
     comma1_idx: usize,
     comma2_idx: usize,
 
-    // This is just used while parsing the name, to keep track of whether we're between tokens.
+    // This is used while parsing the name, to keep track of whether we're between tokens. It is
+    // true while we're parsing the whitespace between tokens.
     token_starting: bool,
 
 	// These are indices into `tokens`, giving the positions of the various parts of the name.
@@ -126,7 +118,6 @@ pub struct TokenizedName {
 enum Case {
     Lower,
     Upper,
-    Unknown,
 }
 
 impl TokenizedName {
@@ -222,7 +213,7 @@ impl TokenizedName {
         &self.bytes[tok_start..tok_end]
     }
 
-    fn consume_comma(&mut self, bytes: &mut &[u8]) {
+    fn consume_comma(&mut self) {
         if self.num_commas == 2 {
             self.warnings.push(NameWarning::TooManyCommas);
 
@@ -247,72 +238,63 @@ impl TokenizedName {
             }
         }
         self.token_starting = true;
-        *bytes = &bytes[1..];
     }
 
-    fn consume_lbrace(&mut self, buf: &mut &[u8]) {
-        debug_assert!(buf[0] == b'{');
+    fn consume_braced_string(&mut self, s: &[u8]) {
+        debug_assert!(s[0] == b'{');
 
         if self.token_starting {
             self.tokens.push(self.bytes.len());
         }
 
-        self.bytes.push(b'{');
-        *buf = &buf[1..];
-        let braced_str = braced_string_end(buf);
-        self.bytes.extend_from_slice(braced_str);
-        *buf = &buf[braced_str.len()..];
-
+        self.bytes.extend_from_slice(s);
         self.token_starting = false;
     }
 
-    fn consume_rbrace(&mut self, bytes: &mut &[u8]) {
-        // If we get here, it means that the name contained an unbalanced right brace.
+    fn consume_rbrace(&mut self) {
         if self.token_starting {
             self.tokens.push(self.bytes.len());
         }
-        *bytes = &bytes[1..];
         self.token_starting = false;
         self.warnings.push(NameWarning::BracesUnbalanced);
     }
 
-    fn consume_sep(&mut self, bytes: &mut &[u8]) {
+    fn consume_sep(&mut self, ch: u8) {
         if !self.token_starting {
-            if lex_class(bytes[0]) == LexClass::WhiteSpace {
+            if lex_class(ch) == LexClass::WhiteSpace {
                 self.bytes.push(b' ');
             } else {
-                self.bytes.push(bytes[0]);
+                self.bytes.push(ch);
             }
         }
-        *bytes = &bytes[1..];
         self.token_starting = true;
     }
 
-    fn consume_other(&mut self, bytes: &mut &[u8]) {
+    fn consume_other(&mut self, ch: u8) {
         if self.token_starting {
             self.tokens.push(self.bytes.len());
         }
-        self.bytes.push(bytes[0]);
-        *bytes = &bytes[1..];
+        self.bytes.push(ch);
         self.token_starting = false;
     }
 
     fn tokenize_from_bytes(&mut self, mut bytes: &[u8]) {
         bytes = self.trim_input(bytes);
-        while !bytes.is_empty() {
-            let ch = bytes[0];
 
-            match ch {
-                b',' => self.consume_comma(&mut bytes),
-                b'{' => self.consume_lbrace(&mut bytes),
-                b'}' => self.consume_rbrace(&mut bytes),
-                ch => {
-                    use crate::input::LexClass::*;
-                    match lex_class(ch) {
-                        WhiteSpace | SepChar => self.consume_sep(&mut bytes),
-                        _ => self.consume_other(&mut bytes),
+        for tok in braced_tokens(bytes) {
+            match tok {
+                Token::UnmatchedRBrace { .. } => self.consume_rbrace(),
+                Token::Braced { s, .. } => self.consume_braced_string(s),
+                Token::Byte { ch, .. } => {
+                    if ch == b',' {
+                        self.consume_comma();
+                    } else {
+                        match lex_class(ch) {
+                            LexClass::WhiteSpace | LexClass::SepChar => self.consume_sep(ch),
+                            _ => self.consume_other(ch),
+                        }
                     }
-                }
+                },
             }
         }
     }
@@ -399,65 +381,37 @@ impl TokenizedName {
 //    b) otherwise, we skip the control sequence and get our case from the next ASCII letter in the
 //      braced string.
 //  2) if the braced string doesn't start with a control sequence, we ignore it.
-fn token_case(mut buf: &[u8]) -> Case {
-    while let Some((ch, rest)) = buf.split_first() {
-        buf = rest;
-
-        match ch {
-            b'a'..=b'z' => return Case::Lower,
-            b'A'..=b'Z' => return Case::Upper,
-            b'{' => {
-                let braced = braced_string_end(buf);
-                if braced.len() >= 2 && buf[0] == b'\\' {
-                    let cseq = control_seq(braced);
-                    let mut case = control_seq_case(cseq);
-                    if case == Case::Unknown {
-                        case = braced_string_case(&braced[cseq.len()..]);
-                    }
-                    return if case == Case::Lower {
-                        Case::Lower
-                    } else {
-                        Case::Upper
-                    }
+fn token_case(buf: &[u8]) -> Case {
+    for tok in braced_tokens(buf) {
+        match tok {
+            Token::Byte { ch, .. } => {
+                match ch {
+                    b'a'..=b'z' => return Case::Lower,
+                    b'A'..=b'Z' => return Case::Upper,
+                    _ => {},
                 }
-                buf = &buf[braced.len()..];
             }
-            _ => {},
+            Token::UnmatchedRBrace { .. } => {}
+            Token::Braced { s, .. } => {
+                if s.len() >= 3 && s[1] == b'\\' {
+                    let cseq = control_seq(&s[1..]);
+                    if let Some(case) = control_seq_case(cseq) {
+                        return case;
+                    } else {
+                        for &ch in &s[(1 + cseq.len())..] {
+                            match ch {
+                                b'a'..=b'z' => return Case::Lower,
+                                b'A'..=b'Z' => return Case::Upper,
+                                _ => {},
+                            }
+                        }
+                    }
+                    return Case::Upper;
+                }
+            }
         }
     }
     Case::Upper
-}
-
-// Look at the balanced braced string at the beginning of `buf` (which does not include the opening
-// '{'). If it has a letter in it, return that letter's case.
-fn braced_string_case(buf: &[u8]) -> Case {
-    let braced = braced_string_end(buf);
-    for &b in braced {
-        match b {
-            b'a'..=b'z' => return Case::Lower,
-            b'A'..=b'Z' => return Case::Upper,
-            _ => {},
-        }
-    }
-    Case::Unknown
-}
-
-// Finds a (balanced) braced string at the beginning of `buf`, which does not include the
-// opening '{'. (If we run out of `buf` while searching for a closing brace, we just return the
-// whole thing.)
-fn braced_string_end(buf: &[u8]) -> &[u8] {
-    let mut depth = 1;
-    for (idx, &c) in buf.iter().enumerate() {
-        if c == b'{' {
-            depth += 1;
-        } else if c == b'}' {
-            depth -= 1;
-        }
-        if depth == 0 {
-            return &buf[..=idx];
-        }
-    }
-    buf
 }
 
 // The buffer starts with a backslash, and we return the control sequence: the backslash, plus the
@@ -473,11 +427,11 @@ fn control_seq(buf: &[u8]) -> &[u8] {
 
 // `buf` contains a control sequence, and we're checking its case. These rules are hard-coded
 // into bibtex.
-fn control_seq_case(buf: &[u8]) -> Case {
+fn control_seq_case(buf: &[u8]) -> Option<Case> {
     match &buf[1..] {
-        b"OE" | b"AE" | b"AA" | b"O" | b"L" => Case::Upper,
-        b"i" | b"j" | b"oe" | b"ae" | b"aa" | b"o" | b"l" | b"ss" => Case::Lower,
-        _ => Case::Unknown,
+        b"OE" | b"AE" | b"AA" | b"O" | b"L" => Some(Case::Upper),
+        b"i" | b"j" | b"oe" | b"ae" | b"aa" | b"o" | b"l" | b"ss" => Some(Case::Lower),
+        _ => None,
     }
 }
 
@@ -501,13 +455,6 @@ mod tests {
         let t = TokenizedName::from_bytes(b"first\tsecond");
         assert_eq!(t.bytes.len(), 12);
         assert_eq!(t.bytes[5], b' ');
-    }
-
-    #[test]
-    fn test_braced_string_end() {
-        assert_eq!(braced_string_end(b"foo} bar"), b"foo}");
-        assert_eq!(braced_string_end(b"foo{nes{}ted}} bar"), b"foo{nes{}ted}}");
-        assert_eq!(braced_string_end(b"foo{unterminated} bar"), b"foo{unterminated} bar");
     }
 
     #[test]
