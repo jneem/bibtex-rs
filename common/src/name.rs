@@ -222,9 +222,14 @@ impl TokenizedName {
         &self.bytes[tok_start..tok_end]
     }
 
-    fn consume_comma(&mut self) {
+    fn consume_comma(&mut self, bytes: &mut &[u8]) {
         if self.num_commas == 2 {
             self.warnings.push(NameWarning::TooManyCommas);
+
+            if !self.token_starting {
+                // We need to synthesize a sepchar between the tokens.
+                self.bytes.push(b' ');
+            }
         } else {
             self.num_commas += 1;
             if self.num_commas == 1 {
@@ -240,8 +245,9 @@ impl TokenizedName {
             } else if !self.token_starting {
                 self.bytes.push(b',');
             }
-            self.token_starting = true;
         }
+        self.token_starting = true;
+        *bytes = &bytes[1..];
     }
 
     fn consume_lbrace(&mut self, buf: &mut &[u8]) {
@@ -254,34 +260,40 @@ impl TokenizedName {
         self.bytes.push(b'{');
         *buf = &buf[1..];
         let braced_str = braced_string_end(buf);
-        dbg!(braced_str);
         self.bytes.extend_from_slice(braced_str);
-        *buf = &buf[(braced_str.len() - 1)..];
-        dbg!(&buf);
+        *buf = &buf[braced_str.len()..];
 
         self.token_starting = false;
     }
 
-    fn consume_rbrace(&mut self) {
+    fn consume_rbrace(&mut self, bytes: &mut &[u8]) {
         // If we get here, it means that the name contained an unbalanced right brace.
         if self.token_starting {
             self.tokens.push(self.bytes.len());
         }
+        *bytes = &bytes[1..];
+        self.token_starting = false;
         self.warnings.push(NameWarning::BracesUnbalanced);
     }
 
-    fn consume_sep(&mut self, ch: u8) {
+    fn consume_sep(&mut self, bytes: &mut &[u8]) {
         if !self.token_starting {
-            self.bytes.push(ch);
+            if lex_class(bytes[0]) == LexClass::WhiteSpace {
+                self.bytes.push(b' ');
+            } else {
+                self.bytes.push(bytes[0]);
+            }
         }
+        *bytes = &bytes[1..];
         self.token_starting = true;
     }
 
-    fn consume_other(&mut self, ch: u8) {
+    fn consume_other(&mut self, bytes: &mut &[u8]) {
         if self.token_starting {
             self.tokens.push(self.bytes.len());
         }
-        self.bytes.push(ch);
+        self.bytes.push(bytes[0]);
+        *bytes = &bytes[1..];
         self.token_starting = false;
     }
 
@@ -291,18 +303,17 @@ impl TokenizedName {
             let ch = bytes[0];
 
             match ch {
-                b',' => self.consume_comma(),
+                b',' => self.consume_comma(&mut bytes),
                 b'{' => self.consume_lbrace(&mut bytes),
-                b'}' => self.consume_rbrace(),
+                b'}' => self.consume_rbrace(&mut bytes),
                 ch => {
                     use crate::input::LexClass::*;
                     match lex_class(ch) {
-                        WhiteSpace | SepChar => self.consume_sep(ch),
-                        _ => self.consume_other(ch),
+                        WhiteSpace | SepChar => self.consume_sep(&mut bytes),
+                        _ => self.consume_other(&mut bytes),
                     }
                 }
             }
-            bytes = &bytes[1..];
         }
     }
 
@@ -335,9 +346,7 @@ impl TokenizedName {
                 let last_nonsep_pos = self.tokens.iter()
                     // self.bytes[idx-1] is the separator before token number `idx`.
                     .rposition(|&idx| idx > 0 && nonsep(self.bytes[idx-1]))
-                    // Even if all tokens are connected by separators, if there is more than one token then put
-                    // the first token as the first name.
-                    .unwrap_or(usize::min(1, self.tokens.len() - 1));
+                    .unwrap_or(0);
 
                 self.first_pos = (0, last_nonsep_pos);
                 self.last_pos = (last_nonsep_pos, self.tokens.len());
@@ -363,6 +372,9 @@ impl TokenizedName {
     // (exclusive).  This figures out which part of that is "von" and which part is "Last", and
     // initializes `self.von_pos` and `self.last_pos` appropriately.
     fn find_von_last(&mut self, start: usize, end: usize) {
+        if end <= start {
+            return;
+        }
         for von_end in (start..(end-1)).rev() {
             if token_case(self.token(von_end)) == Case::Lower {
                 self.von_pos = (start, von_end + 1);
@@ -377,7 +389,8 @@ impl TokenizedName {
 
 // Finds the case of a token. The rules are a little complicated, and are contained in WEB module
 // 397.  When there are no braces, the rule is simple: we look for the first ASCII letter, and
-// return its case (or `Case::Unknown`) if there are no ASCII letters).
+// return its case (or `Case::Upper` if there are no ASCII letters). Generally speaking, we default
+// to `Case::Upper`.
 //
 // When a braced string is encountered, there are two possibilities:
 //  1) the braced string starts with a control sequence (e.g. {\'a}). In this case,
@@ -401,8 +414,10 @@ fn token_case(mut buf: &[u8]) -> Case {
                     if case == Case::Unknown {
                         case = braced_string_case(&braced[cseq.len()..]);
                     }
-                    if case != Case::Unknown {
-                        return case;
+                    return if case == Case::Lower {
+                        Case::Lower
+                    } else {
+                        Case::Upper
                     }
                 }
                 buf = &buf[braced.len()..];
@@ -410,7 +425,7 @@ fn token_case(mut buf: &[u8]) -> Case {
             _ => {},
         }
     }
-    Case::Unknown
+    Case::Upper
 }
 
 // Look at the balanced braced string at the beginning of `buf` (which does not include the opening
@@ -482,6 +497,13 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_whitespace() {
+        let t = TokenizedName::from_bytes(b"first\tsecond");
+        assert_eq!(t.bytes.len(), 12);
+        assert_eq!(t.bytes[5], b' ');
+    }
+
+    #[test]
     fn test_braced_string_end() {
         assert_eq!(braced_string_end(b"foo} bar"), b"foo}");
         assert_eq!(braced_string_end(b"foo{nes{}ted}} bar"), b"foo{nes{}ted}}");
@@ -495,8 +517,10 @@ mod tests {
         assert_eq!(token_case(b"Apple"), Upper);
         assert_eq!(token_case(b"apple"), Lower);
         assert_eq!(token_case(b"{A}pple"), Lower);
-        assert_eq!(token_case(b"{\\A}pple"), Lower);
+        assert_eq!(token_case(b"{\\A}pple"), Upper);
+        assert_eq!(token_case(b"{\\A a}pple"), Lower);
         assert_eq!(token_case(b"{\\AA}pple"), Upper);
+        assert_eq!(token_case(b"{\\AA a}pple"), Upper);
         assert_eq!(token_case(b"{\\aa}pple"), Lower);
     }
 
@@ -544,8 +568,19 @@ mod tests {
             // Hyphens affect the split between first and last names. Ties don't.
             "AA BB CC" => ("AA BB", "", "CC", ""),
             "AA BB-CC" => ("AA", "", "BB-CC", ""),
-            "AA-BB-CC" => ("AA", "", "BB-CC", ""),
+            "AA-BB-CC" => ("", "", "AA-BB-CC", ""),
             "AA BB~CC" => ("AA BB", "", "CC", ""),
+
+            // Cases with unbalanced braces. Note that the results we're asserting here differ
+            // from bibtex's behavior because they have a bug: `name_scan_for_and` in WEB module
+            // 384 doesn't reset `brace_level` if the string it's reading has unbalanced braces.
+            // Since WEB module 387 doesn't initialize `brace_level`, it can start with a non-zero
+            // `brace_level`.
+            "{First} {Last" => ("{First}", "", "{Last", ""),
+            "{First} }{Last" => ("{First}", "", "{Last", ""),
+
+            // Excess commas are ignored, but treated as token separators.
+            "von Last, Jr, Fir,st" => ("Fir st", "von", "Last", "Jr"),
         );
     }
 

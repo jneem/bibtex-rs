@@ -43,8 +43,7 @@ implementation, including a parser for `.aux` files and an interpreter for
 # Known incompatiblities
 
 This section lists situations where we our behavior intentionally differs from
-that of BibTex. All of these concern differences in error messages, and not
-in the behavior of the parser on correct input.
+that of BibTex. All of these concern invalid input.
 
 - When we encounter an I/O error reading the input, we report an error. BibTex
   treats an I/O error the same as it does an EOF.
@@ -52,3 +51,8 @@ in the behavior of the parser on correct input.
   display will match the input file more closely than BibTex's. This is because
   BibTex sometimes changes parts of the input to lowercase before printing the
   error message.
+- BibTex has (in my opinion) some bugs while parsing names containing unbalanced
+  braces. For example, in the string "{First} } {Last", it declares the first
+  name to be "{First} }" instead of "{First}". We don't replicate this behavior
+  (which is quite hard to hit, anyway, because the `.bib` parser won't let
+  unbalanced braces through).

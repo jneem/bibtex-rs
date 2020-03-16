@@ -192,7 +192,7 @@ impl NameChecker {
 
             FUNCTION {{test}}
             {{ "{}"
-            #1 "{{ff}} -- {{vv}} -- {{ll}} -- {{jj}}" format.name$ top$ }}
+            #1 "XXX{{ff}} -- {{vv}} -- {{ll}} -- {{jj}}" format.name$ top$ }}
 
             READ
 
@@ -212,15 +212,14 @@ impl NameChecker {
 
         // There is only one interesting line (and a bunch of warnings). Find it.
         let output = <&BStr>::from(&output.stdout[..]);
-        let output = <&BStr>::from(output.lines().skip(6).next().unwrap());
-        dbg!(output);
+        let output = <&BStr>::from(output.lines().filter(|line| line.starts_with(b"XXX")).next().unwrap());
+        let output = &output[3..];
         BString::from(output)
     }
 
     pub fn our_output(&self) -> BString {
         let n = SplitNames::from_bytes(&self.names);
         let t = TokenizedName::from_bytes(&n[0]);
-        dbg!(&t);
 
         let mut ret = Vec::new();
 
